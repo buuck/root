@@ -3,38 +3,11 @@
 // Bindings
 #include "PyROOT.h"
 #include "TFunctionHolder.h"
-#include "Adapters.h"
 #include "ObjectProxy.h"
 
-// ROOT
-#include "TClass.h"
-
-
-//- data and local helpers ---------------------------------------------------
-namespace {
-
-   TClassRef GetGlobalNamespace() {
-      static TClass c("ROOT::GlobalScopePlaceHolder",0,"","",-1,-1,kTRUE);
-      return &c;
-   }
-
-} // unnamed namespace
-
-
-//- constructor -----------------------------------------------------------------
-PyROOT::TFunctionHolder::TFunctionHolder( const TMemberAdapter& function ) :
-      TMethodHolder( GetGlobalNamespace().GetClass(), function )
-{
-}
-
-//____________________________________________________________________________
-PyROOT::TFunctionHolder::TFunctionHolder( const TScopeAdapter& scope, const TMemberAdapter& function ) :
-      TMethodHolder( scope, function )
-{
-}
 
 //- public members --------------------------------------------------------------
-PyObject* PyROOT::TFunctionHolder::FilterArgs(
+PyObject* PyROOT::TFunctionHolder::PreProcessArgs(
       ObjectProxy*& self, PyObject* args, PyObject* )
 {
 // no self means called as a free function; all ok
@@ -58,31 +31,32 @@ PyObject* PyROOT::TFunctionHolder::FilterArgs(
    return newArgs;
 }
 
-//____________________________________________________________________________
-PyObject* PyROOT::TFunctionHolder::operator()(
-      ObjectProxy* self, PyObject* args, PyObject* kwds, Long_t user, Bool_t release_gil )
+////////////////////////////////////////////////////////////////////////////////
+/// preliminary check in case keywords are accidently used (they are ignored otherwise)
+
+PyObject* PyROOT::TFunctionHolder::Call(
+      ObjectProxy*& self, PyObject* args, PyObject* kwds, TCallContext* ctxt )
 {
-// preliminary check in case keywords are accidently used (they are ignored otherwise)
    if ( kwds != 0 && PyDict_Size( kwds ) ) {
       PyErr_SetString( PyExc_TypeError, "keyword arguments are not yet supported" );
       return 0;
    }
 
 // setup as necessary
-   if ( ! this->Initialize() )
+   if ( ! this->Initialize( ctxt ) )
       return 0;                              // important: 0, not Py_None
 
 // reorder self into args, if necessary
-   if ( ! ( args = this->FilterArgs( self, args, kwds ) ) )
+   if ( ! ( args = this->PreProcessArgs( self, args, kwds ) ) )
       return 0;
 
 // translate the arguments
-   Bool_t bConvertOk = this->SetMethodArgs( args, user );
+   Bool_t bConvertOk = this->ConvertAndSetArgs( args, ctxt );
    Py_DECREF( args );
 
    if ( bConvertOk == kFALSE )
       return 0;                              // important: 0, not Py_None
 
 // execute function
-   return this->Execute( 0, release_gil );
+   return this->Execute( 0, 0, ctxt );
 }

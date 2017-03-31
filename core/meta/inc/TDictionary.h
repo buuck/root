@@ -41,13 +41,9 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TNamed
 #include "TNamed.h"
-#endif
 
-#ifndef ROOT_ESTLType
 #include "ESTLType.h"
-#endif
 
 // The following are opaque type and are never really declared
 // The specific implemenation of TInterpreter will cast the
@@ -174,6 +170,8 @@ public:
    TDictionary(const TDictionary& dict);
    virtual ~TDictionary();
 
+   TDictionary& operator=(const TDictionary& other);
+
    void                CreateAttributeMap();
    TDictAttributeMap  *GetAttributeMap() const
    {
@@ -184,19 +182,24 @@ public:
    }
    virtual Long_t      Property() const = 0;
    static TDictionary* GetDictionary(const char* name);
-   static TDictionary* GetDictionary(const type_info &typeinfo);
+   static TDictionary* GetDictionary(const std::type_info &typeinfo);
 
    // Type of STL container (returned by IsSTLContainer).
    enum ESTLType {
-      kNone      = ROOT::kNotSTL,
-      kVector    = ROOT::kSTLvector,
-      kList      = ROOT::kSTLlist,
-      kDeque     = ROOT::kSTLdeque,
-      kMap       = ROOT::kSTLmap,
-      kMultimap  = ROOT::kSTLmultimap,
-      kSet       = ROOT::kSTLset,
-      kMultiset  = ROOT::kSTLmultiset,
-      kBitset    = ROOT::kSTLbitset
+      kNone              = ROOT::kNotSTL,
+      kVector            = ROOT::kSTLvector,
+      kList              = ROOT::kSTLlist,
+      kForwardlist       = ROOT::kSTLforwardlist,
+      kDeque             = ROOT::kSTLdeque,
+      kMap               = ROOT::kSTLmap,
+      kMultimap          = ROOT::kSTLmultimap,
+      kSet               = ROOT::kSTLset,
+      kMultiset          = ROOT::kSTLmultiset,
+      kUnorderedSet      = ROOT::kSTLunorderedset,
+      kUnorderedMultiset = ROOT::kSTLunorderedmultiset,
+      kUnorderedMap      = ROOT::kSTLunorderedmap,
+      kUnorderedMultimap = ROOT::kSTLunorderedmultimap,
+      kBitset            = ROOT::kSTLbitset
    };
 
    typedef const void *DeclId_t;

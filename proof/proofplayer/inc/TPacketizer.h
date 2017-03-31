@@ -26,17 +26,15 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TVirtualPacketizer
 #include "TVirtualPacketizer.h"
-#endif
 
 
 class TMessage;
 class TTimer;
 class TTree;
 class TMap;
+class TProofProgressStatus;
 class TProofStats;
-
 
 class TPacketizer : public TVirtualPacketizer {
 
@@ -51,7 +49,6 @@ private:
    TList    *fFileNodes;    // nodes with files
    TList    *fUnAllocated;  // nodes with unallocated files
    TList    *fActive;       // nodes with unfinished files
-   TMap     *fSlaveStats;   // slave status, keyed by correspondig TSlave
 
    Long64_t  fPacketSize;   // global base packet size
                                  // It can be set with PROOF_PacketSize
@@ -66,6 +63,10 @@ private:
                                  // assuming all slaves have equal processing rate, packet size
                                  // is (#events processed by 1 slave) / fPacketSizeAsAFraction.
                                  // It can be set with PROOF_PacketAsAFraction in input list.
+
+   // Add workers controls
+   Bool_t fHeuristicPSiz;   // Whether the packet size is calculated heuristically
+   Bool_t fDefMaxWrkNode;   // Whether the default is used for the max workers per node
 
    TPacketizer();
    TPacketizer(const TPacketizer&);     // no implementation, will generate
@@ -89,6 +90,7 @@ public:
                 TList *input, TProofProgressStatus *st);
    virtual ~TPacketizer();
 
+   Int_t         AddWorkers(TList *workers);
    TDSetElement *GetNextPacket(TSlave *sl, TMessage *r);
    Long64_t      GetEntriesProcessed(TSlave *sl) const;
 

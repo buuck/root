@@ -6,7 +6,7 @@
 // LICENSE.TXT for details.
 //------------------------------------------------------------------------------
 
-// RUN: cat %s | %cling -I%p | FileCheck %s
+// RUN: cat %s | %built_cling -I%p | FileCheck %s
 
 // The tests shows the basic control flow structures that contain dynamic
 // expressions. There are several cases that could be distinguished.
@@ -30,7 +30,9 @@
 extern "C" int printf(const char*,...);
 
 .dynamicExtensions
-gCling->setCallbacks(new cling::test::SymbolResolverCallback(gCling));
+std::unique_ptr<cling::test::SymbolResolverCallback> SRC;
+SRC.reset(new cling::test::SymbolResolverCallback(gCling))
+gCling->setCallbacks(std::move(SRC));
 
 int a[5] = {1,2,3,4,5};
 if (h->PrintArray(a, 5)) { // runtime result type bool
@@ -38,6 +40,7 @@ if (h->PrintArray(a, 5)) { // runtime result type bool
   printf("\n%s\n", "Array Printed Successfully!");
 }
 // CHECK: 12345
+// CHECK: Replaced in then.
 // CHECK: Array Printed Successfully!
 
 int b, c = 1;

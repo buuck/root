@@ -141,14 +141,15 @@ static void parseMCMarkup(StringRef Filename) {
     errs() << ToolName << ": " << EC.message() << '\n';
     return;
   }
-  MemoryBuffer *Buffer = BufferPtr->release();
+  std::unique_ptr<MemoryBuffer> &Buffer = BufferPtr.get();
 
   SourceMgr SrcMgr;
 
-  // Tell SrcMgr about this buffer, which is what the parser will pick up.
-  SrcMgr.AddNewSourceBuffer(Buffer, SMLoc());
-
   StringRef InputSource = Buffer->getBuffer();
+
+  // Tell SrcMgr about this buffer, which is what the parser will pick up.
+  SrcMgr.AddNewSourceBuffer(std::move(Buffer), SMLoc());
+
   MarkupLexer Lex(InputSource);
   MarkupParser Parser(Lex, SrcMgr);
 
@@ -207,7 +208,7 @@ static void parseMCMarkup(StringRef Filename) {
 
 int main(int argc, char **argv) {
   // Print a stack trace if we signal out.
-  sys::PrintStackTraceOnErrorSignal();
+  sys::PrintStackTraceOnErrorSignal(argv[0]);
   PrettyStackTraceProgram X(argc, argv);
 
   llvm_shutdown_obj Y;  // Call llvm_shutdown() on exit.

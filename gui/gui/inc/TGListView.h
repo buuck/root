@@ -31,15 +31,9 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TGCanvas
 #include "TGCanvas.h"
-#endif
-#ifndef ROOT_TGWidget
 #include "TGWidget.h"
-#endif
-#ifndef ROOT_TGSplitter
 #include "TGSplitter.h"
-#endif
 
 
 enum EListViewMode {
@@ -230,6 +224,8 @@ public:
 
    virtual void AddItem(TGLVEntry *item)
                   { AddFrame(item, fItemLayout); item->SetColumns(fCpos, fJmode); fTotal++; }
+   virtual void SelectEntry(TGLVEntry *item)
+                  { ActivateItem(item->GetFrameElement()); }
 
    virtual void  SetListView(TGListView *lv) { fListView = lv; }
    virtual void  RemoveItemWithData(void *userData);
@@ -250,7 +246,8 @@ public:
    virtual void LineRight(Bool_t select = kFALSE);
 
    virtual Bool_t HandleButton(Event_t* event);
-   TList* GetSelectedItems();
+   TList *GetSelectedItems();
+   TList *GetSelectedEntries();
    Bool_t GetMultipleSelection() const { return fMultiSelect; };
    void   SetMultipleSelection(Bool_t multi = kTRUE) { fMultiSelect = multi; };
    void   SetHeaders(Int_t ncolumns) { fListView->SetHeaders(ncolumns); }

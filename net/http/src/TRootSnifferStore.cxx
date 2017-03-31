@@ -8,34 +8,39 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
+ClassImp(TRootSnifferStore)
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// normal constructor
+
 TRootSnifferStore::TRootSnifferStore() :
    TObject(),
    fResPtr(0),
    fResClass(0),
    fResMember(0),
-   fResNumChilds(-1)
+   fResNumChilds(-1),
+   fResRestrict(0)
 {
-   // normal constructor
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// destructor
+
 TRootSnifferStore::~TRootSnifferStore()
 {
-   // destructor
 }
 
-//______________________________________________________________________________
-void TRootSnifferStore::SetResult(void *_res, TClass *_rescl,
-                                  TDataMember *_resmemb, Int_t _res_chld)
-{
-   // set pointer on found element, class and number of childs
+////////////////////////////////////////////////////////////////////////////////
+/// set pointer on found element, class and number of childs
 
+void TRootSnifferStore::SetResult(void *_res, TClass *_rescl,
+                                  TDataMember *_resmemb, Int_t _res_chld, Int_t _restr)
+{
    fResPtr = _res;
    fResClass = _rescl;
    fResMember = _resmemb;
    fResNumChilds = _res_chld;
+   fResRestrict = _restr;
 }
 
 // =================================================================================
@@ -48,123 +53,165 @@ void TRootSnifferStore::SetResult(void *_res, TClass *_rescl,
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-//______________________________________________________________________________
+ClassImp(TRootSnifferStoreXml)
+
+////////////////////////////////////////////////////////////////////////////////
+/// starts new xml node, will be closed by CloseNode
+
 void TRootSnifferStoreXml::CreateNode(Int_t lvl, const char *nodename)
 {
-   // starts new xml node, will be closed by CloseNode
-
-   buf->Append(TString::Format("%*s<%s", compact ? 0 : (lvl+1) * 2, "", nodename));
+   fBuf->Append(TString::Format("%*s<item _name=\"%s\"", fCompact ? 0 : (lvl + 1) * 2, "", nodename));
 }
 
-//______________________________________________________________________________
-void TRootSnifferStoreXml::SetField(Int_t, const char *field, const char *value,
-                                    Int_t)
-{
-   // set field (xml attribute) in current node
+////////////////////////////////////////////////////////////////////////////////
+/// set field (xml attribute) in current node
 
+void TRootSnifferStoreXml::SetField(Int_t, const char *field, const char *value,
+                                    Bool_t)
+{
    if (strpbrk(value, "<>&\'\"") == 0) {
-      buf->Append(TString::Format(" %s=\"%s\"", field, value));
+      fBuf->Append(TString::Format(" %s=\"%s\"", field, value));
    } else {
-      buf->Append(TString::Format(" %s=\"", field));
+      fBuf->Append(TString::Format(" %s=\"", field));
       const char *v = value;
       while (*v != 0) {
          switch (*v) {
             case '<' :
-               buf->Append("&lt;");
+               fBuf->Append("&lt;");
                break;
             case '>' :
-               buf->Append("&gt;");
+               fBuf->Append("&gt;");
                break;
             case '&' :
-               buf->Append("&amp;");
+               fBuf->Append("&amp;");
                break;
             case '\'' :
-               buf->Append("&apos;");
+               fBuf->Append("&apos;");
                break;
             case '\"' :
-               buf->Append("&quot;");
+               fBuf->Append("&quot;");
                break;
             default:
-               buf->Append(*v);
+               fBuf->Append(*v);
                break;
          }
          v++;
       }
 
-      buf->Append("\"");
+      fBuf->Append("\"");
    }
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// called before next child node created
+
 void TRootSnifferStoreXml::BeforeNextChild(Int_t, Int_t nchld, Int_t)
 {
-   // called before next child node created
-
-   if (nchld == 0) buf->Append(TString::Format(">%s", (compact ? "" : "\n")));
+   if (nchld == 0) fBuf->Append(TString::Format(">%s", (fCompact ? "" : "\n")));
 }
 
-//______________________________________________________________________________
-void TRootSnifferStoreXml::CloseNode(Int_t lvl, const char *nodename,
-                                     Int_t numchilds)
-{
-   // called when node should be closed
-   // depending from number of childs different xml format is applied
+////////////////////////////////////////////////////////////////////////////////
+/// called when node should be closed
+/// depending from number of childs different xml format is applied
 
+void TRootSnifferStoreXml::CloseNode(Int_t lvl, Int_t numchilds)
+{
    if (numchilds > 0)
-      buf->Append(TString::Format("%*s</%s>%s", compact ? 0 : (lvl+1) * 2, "", nodename, (compact ? "" : "\n")));
+      fBuf->Append(TString::Format("%*s</item>%s", fCompact ? 0 : (lvl + 1) * 2, "", (fCompact ? "" : "\n")));
    else
-      buf->Append(TString::Format("/>%s", (compact ? "" : "\n")));
+      fBuf->Append(TString::Format("/>%s", (fCompact ? "" : "\n")));
 }
 
 // ============================================================================
 
 //////////////////////////////////////////////////////////////////////////
 //                                                                      //
-// TRootSnifferStoreXml                                                 //
+// TRootSnifferStoreJson                                                //
 //                                                                      //
 // Used to store scanned objects hierarchy in JSON form                 //
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-//______________________________________________________________________________
+ClassImp(TRootSnifferStoreJson)
+
+////////////////////////////////////////////////////////////////////////////////
+/// starts new json object, will be closed by CloseNode
+
 void TRootSnifferStoreJson::CreateNode(Int_t lvl, const char *nodename)
 {
-   // starts new json object, will be closed by CloseNode
-
-   buf->Append(TString::Format("%*s{", compact ? 0 : lvl * 4, ""));
-   SetField(lvl, "_name", nodename, -1);
+   fBuf->Append(TString::Format("%*s{", fCompact ? 0 : lvl * 4, ""));
+   if (!fCompact) fBuf->Append("\n");
+   fBuf->Append(TString::Format("%*s\"_name\"%s\"%s\"", fCompact ? 0 : lvl * 4 + 2, "", (fCompact ? ":" : " : "), nodename));
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// set field (json field) in current node
+
 void TRootSnifferStoreJson::SetField(Int_t lvl, const char *field,
-                                     const char *value, Int_t nfld)
+                                     const char *value, Bool_t with_quotes)
 {
-   // set field (json field) in current node
-
-   if (nfld>=0) buf->Append(",");
-   if (!compact) buf->Append("\n");
-   buf->Append(TString::Format("%*s\"%s\"%s\"%s\"", compact ? 0 : lvl * 4 + 2, "", field, (compact ? ":" : " : "), value));
+   fBuf->Append(",");
+   if (!fCompact) fBuf->Append("\n");
+   fBuf->Append(TString::Format("%*s\"%s\"%s", fCompact ? 0 : lvl * 4 + 2, "", field, (fCompact ? ":" : " : ")));
+   if (!with_quotes) {
+      fBuf->Append(value);
+   } else {
+      fBuf->Append("\"");
+      for (const char *v = value; *v != 0; v++)
+         switch (*v) {
+            case '\n':
+               fBuf->Append("\\n");
+               break;
+            case '\t':
+               fBuf->Append("\\t");
+               break;
+            case '\"':
+               fBuf->Append("\\\"");
+               break;
+            case '\\':
+               fBuf->Append("\\\\");
+               break;
+            case '\b':
+               fBuf->Append("\\b");
+               break;
+            case '\f':
+               fBuf->Append("\\f");
+               break;
+            case '\r':
+               fBuf->Append("\\r");
+               break;
+            case '/':
+               fBuf->Append("\\/");
+               break;
+            default:
+               if ((*v > 31) && (*v < 127))
+                  fBuf->Append(*v);
+               else
+                  fBuf->Append(TString::Format("\\u%04x", (unsigned) *v));
+         }
+      fBuf->Append("\"");
+   }
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// called before next child node created
+
 void TRootSnifferStoreJson::BeforeNextChild(Int_t lvl, Int_t nchld, Int_t)
 {
-   // called before next child node created
-
-   buf->Append(",");
-   if (!compact) buf->Append("\n");
+   fBuf->Append(",");
+   if (!fCompact) fBuf->Append("\n");
    if (nchld == 0)
-      buf->Append(TString::Format("%*s\"_childs\" : [\n", compact ? 0 : lvl * 4 + 2, ""));
+      fBuf->Append(TString::Format("%*s\"_childs\"%s", (fCompact ? 0 : lvl * 4 + 2), "", (fCompact ? ":[" : " : [\n")));
 }
 
-//______________________________________________________________________________
-void TRootSnifferStoreJson::CloseNode(Int_t lvl, const char *, Int_t numchilds)
-{
-   // called when node should be closed
-   // depending from number of childs different xml format is applied
+////////////////////////////////////////////////////////////////////////////////
+/// called when node should be closed
+/// depending from number of childs different xml format is applied
 
+void TRootSnifferStoreJson::CloseNode(Int_t lvl, Int_t numchilds)
+{
    if (numchilds > 0)
-      buf->Append(TString::Format("\n%*s]", compact ? 0 : lvl * 4 + 2, ""));
-   buf->Append(TString::Format("\n%*s}", compact ? 0 : lvl * 4, ""));
+      fBuf->Append(TString::Format("%s%*s]", (fCompact ? "" : "\n"), fCompact ? 0 : lvl * 4 + 2, ""));
+   fBuf->Append(TString::Format("%s%*s}", (fCompact ? "" : "\n"), fCompact ? 0 : lvl * 4, ""));
 }
 

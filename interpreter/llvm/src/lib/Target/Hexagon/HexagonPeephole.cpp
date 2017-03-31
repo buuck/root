@@ -67,14 +67,15 @@ static cl::opt<bool> DisablePNotP("disable-hexagon-pnotp",
     cl::desc("Disable Optimization of PNotP"));
 
 static cl::opt<bool> DisableOptSZExt("disable-hexagon-optszext",
-    cl::Hidden, cl::ZeroOrMore, cl::init(false),
+    cl::Hidden, cl::ZeroOrMore, cl::init(true),
     cl::desc("Disable Optimization of Sign/Zero Extends"));
 
 static cl::opt<bool> DisableOptExtTo64("disable-hexagon-opt-ext-to-64",
-    cl::Hidden, cl::ZeroOrMore, cl::init(false),
+    cl::Hidden, cl::ZeroOrMore, cl::init(true),
     cl::desc("Disable Optimization of extensions to i64."));
 
 namespace llvm {
+  FunctionPass *createHexagonPeephole();
   void initializeHexagonPeepholePass(PassRegistry&);
 }
 
@@ -111,10 +112,11 @@ INITIALIZE_PASS(HexagonPeephole, "hexagon-peephole", "Hexagon Peephole",
                 false, false)
 
 bool HexagonPeephole::runOnMachineFunction(MachineFunction &MF) {
-  QII = static_cast<const HexagonInstrInfo *>(MF.getTarget().
-                                        getInstrInfo());
-  QRI = static_cast<const HexagonRegisterInfo *>(MF.getTarget().
-                                       getRegisterInfo());
+  if (skipFunction(*MF.getFunction()))
+    return false;
+
+  QII = static_cast<const HexagonInstrInfo *>(MF.getSubtarget().getInstrInfo());
+  QRI = MF.getSubtarget<HexagonSubtarget>().getRegisterInfo();
   MRI = &MF.getRegInfo();
 
   DenseMap<unsigned, unsigned> PeepholeMap;
@@ -125,7 +127,7 @@ bool HexagonPeephole::runOnMachineFunction(MachineFunction &MF) {
   // Loop over all of the basic blocks.
   for (MachineFunction::iterator MBBb = MF.begin(), MBBe = MF.end();
        MBBb != MBBe; ++MBBb) {
-    MachineBasicBlock* MBB = MBBb;
+    MachineBasicBlock *MBB = &*MBBb;
     PeepholeMap.clear();
     PeepholeDoubleRegsMap.clear();
 
@@ -135,7 +137,7 @@ bool HexagonPeephole::runOnMachineFunction(MachineFunction &MF) {
       MachineInstr *MI = MII;
       // Look for sign extends:
       // %vreg170<def> = SXTW %vreg166
-      if (!DisableOptSZExt && MI->getOpcode() == Hexagon::SXTW) {
+      if (!DisableOptSZExt && MI->getOpcode() == Hexagon::A2_sxtw) {
         assert (MI->getNumOperands() == 2);
         MachineOperand &Dst = MI->getOperand(0);
         MachineOperand &Src  = MI->getOperand(1);
@@ -154,7 +156,7 @@ bool HexagonPeephole::runOnMachineFunction(MachineFunction &MF) {
       // Look for  %vreg170<def> = COMBINE_ir_V4 (0, %vreg169)
       // %vreg170:DoublRegs, %vreg169:IntRegs
       if (!DisableOptExtTo64 &&
-          MI->getOpcode () == Hexagon::COMBINE_Ir_V4) {
+          MI->getOpcode () == Hexagon::A4_combineir) {
         assert (MI->getNumOperands() == 3);
         MachineOperand &Dst = MI->getOperand(0);
         MachineOperand &Src1 = MI->getOperand(1);
@@ -171,7 +173,7 @@ bool HexagonPeephole::runOnMachineFunction(MachineFunction &MF) {
       // %vregIntReg = COPY %vregDoubleReg1:subreg_loreg.
       // and convert into
       // %vregIntReg = COPY %vregDoubleReg0:subreg_hireg.
-      if (MI->getOpcode() == Hexagon::LSRd_ri) {
+      if (MI->getOpcode() == Hexagon::S2_lsr_i_p) {
         assert(MI->getNumOperands() == 3);
         MachineOperand &Dst = MI->getOperand(0);
         MachineOperand &Src1 = MI->getOperand(1);
@@ -181,12 +183,12 @@ bool HexagonPeephole::runOnMachineFunction(MachineFunction &MF) {
         unsigned DstReg = Dst.getReg();
         unsigned SrcReg = Src1.getReg();
         PeepholeDoubleRegsMap[DstReg] =
-          std::make_pair(*&SrcReg, 1/*Hexagon::subreg_hireg*/);
+          std::make_pair(*&SrcReg, Hexagon::subreg_hireg);
       }
 
       // Look for P=NOT(P).
       if (!DisablePNotP &&
-          (MI->getOpcode() == Hexagon::NOT_p)) {
+          (MI->getOpcode() == Hexagon::C2_not)) {
         assert (MI->getNumOperands() == 2);
         MachineOperand &Dst = MI->getOperand(0);
         MachineOperand &Src  = MI->getOperand(1);
@@ -244,7 +246,7 @@ bool HexagonPeephole::runOnMachineFunction(MachineFunction &MF) {
       // Look for Predicated instructions.
       if (!DisablePNotP) {
         bool Done = false;
-        if (QII->isPredicated(MI)) {
+        if (QII->isPredicated(*MI)) {
           MachineOperand &Op0 = MI->getOperand(0);
           unsigned Reg0 = Op0.getReg();
           const TargetRegisterClass *RC0 = MRI->getRegClass(Reg0);
@@ -271,23 +273,15 @@ bool HexagonPeephole::runOnMachineFunction(MachineFunction &MF) {
           unsigned PR = 1, S1 = 2, S2 = 3;   // Operand indices.
 
           switch (Op) {
-            case Hexagon::TFR_condset_rr:
-            case Hexagon::TFR_condset_ii:
-            case Hexagon::MUX_ii:
-            case Hexagon::MUX_rr:
+            case Hexagon::C2_mux:
+            case Hexagon::C2_muxii:
               NewOp = Op;
               break;
-            case Hexagon::TFR_condset_ri:
-              NewOp = Hexagon::TFR_condset_ir;
+            case Hexagon::C2_muxri:
+              NewOp = Hexagon::C2_muxir;
               break;
-            case Hexagon::TFR_condset_ir:
-              NewOp = Hexagon::TFR_condset_ri;
-              break;
-            case Hexagon::MUX_ri:
-              NewOp = Hexagon::MUX_ir;
-              break;
-            case Hexagon::MUX_ir:
-              NewOp = Hexagon::MUX_ri;
+            case Hexagon::C2_muxir:
+              NewOp = Hexagon::C2_muxri;
               break;
           }
           if (NewOp) {
@@ -317,6 +311,7 @@ void HexagonPeephole::ChangeOpInto(MachineOperand &Dst, MachineOperand &Src) {
     case MachineOperand::MO_Register:
       if (Src.isReg()) {
         Dst.setReg(Src.getReg());
+        Dst.setSubReg(Src.getSubReg());
       } else if (Src.isImm()) {
         Dst.ChangeToImmediate(Src.getImm());
       } else {
@@ -331,6 +326,7 @@ void HexagonPeephole::ChangeOpInto(MachineOperand &Dst, MachineOperand &Src) {
         Dst.ChangeToRegister(Src.getReg(), Src.isDef(), Src.isImplicit(),
                              Src.isKill(), Src.isDead(), Src.isUndef(),
                              Src.isDebug());
+        Dst.setSubReg(Src.getSubReg());
       } else {
         llvm_unreachable("Unexpected src operand type");
       }

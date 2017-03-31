@@ -20,11 +20,7 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TH2
 #include "TH2.h"
-#endif
-
-#include "TList.h"
 
 class TH2PolyBin: public TObject{
 
@@ -82,6 +78,7 @@ public:
    virtual Bool_t Add(const TH1 *h1, const TH1 *h2, Double_t c1=1, Double_t c2=1);
    virtual Bool_t Add(TF1 *h1, Double_t c1=1, Option_t *option="");
    void         ClearBinContents();                 // Clears the content of all bins
+   TObject     *Clone(const char* newname = "") const;
    void         ChangePartition(Int_t n, Int_t m);  // Sets the number of partition cells to another value
    Int_t        Fill(Double_t x,Double_t y);
    Int_t        Fill(Double_t x,Double_t y, Double_t w);
@@ -109,7 +106,7 @@ public:
    Double_t     GetMinimum() const;
    Double_t     GetMinimum(Double_t minval) const;
    Bool_t       GetNewBinAdded() const{return fNewBinAdded;}
-   Int_t        GetNumberOfBins() const{return fNcells;}
+   Int_t        GetNumberOfBins() const{return fNcells-kNOverflow;}
    void         Honeycomb(Double_t xstart, Double_t ystart, Double_t a, Int_t k, Int_t s);   // Bins the histogram using a honeycomb structure
    Double_t     Integral(Option_t* option = "") const;
    Double_t     Integral(Int_t, Int_t, const Option_t*) const{return 0;}                             //MayNotUse
@@ -127,12 +124,15 @@ public:
    void         SetNewBinAdded(Bool_t flag){fNewBinAdded = flag;}
 
 protected:
-   TList   *fBins;              //List of bins.
-   Double_t fOverflow[9];       //Overflow bins
+    enum {
+      kNOverflow       = 9  //  number of overflows bins
+   };
+   TList   *fBins;              //List of bins. The list owns the contained objects
+   Double_t fOverflow[kNOverflow];       //Overflow bins
    Int_t    fCellX;             //Number of partition cells in the x-direction of the histogram
    Int_t    fCellY;             //Number of partition cells in the y-direction of the histogram
    Int_t    fNCells;            //Number of partition cells: fCellX*fCellY
-   TList   *fCells;             //[fNCells] The array of TLists that store the bins that intersect with each cell
+   TList   *fCells;             //[fNCells] The array of TLists that store the bins that intersect with each cell. List do not own the contained objects
    Double_t fStepX, fStepY;     //Dimensions of a partition cell
    Bool_t  *fIsEmpty;           //[fNCells] The array that returns true if the cell at the given coordinate is empty
    Bool_t  *fCompletelyInside;  //[fNCells] The array that returns true if the cell at the given coordinate is completely inside a bin
@@ -144,8 +144,15 @@ protected:
    void   Initialize(Double_t xlow, Double_t xup, Double_t ylow, Double_t yup, Int_t n, Int_t m);
    Bool_t IsIntersecting(TH2PolyBin *bin, Double_t xclipl, Double_t xclipr, Double_t yclipb, Double_t yclipt);
    Bool_t IsIntersectingPolygon(Int_t bn, Double_t *x, Double_t *y, Double_t xclipl, Double_t xclipr, Double_t yclipb, Double_t yclipt);
+   // needed by TH1 - no need to have a separate implementation , but internal ibin=0 is first bin. 
+   virtual Double_t RetrieveBinContent(Int_t bin) const {
+      return (bin>=kNOverflow) ? GetBinContent(bin-kNOverflow+1) : GetBinContent(-bin-1);
+   }
+   virtual void     UpdateBinContent(Int_t bin, Double_t content) {
+      return (bin>=kNOverflow) ? SetBinContent(bin-kNOverflow+1,content) : SetBinContent(-bin-1,content);
+   }
 
    ClassDef(TH2Poly,1)  //2-Dim histogram with polygon bins
-};
+ };
 
 #endif

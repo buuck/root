@@ -12,6 +12,7 @@
 #include "cling/Interpreter/Interpreter.h"
 
 #include "clang/AST/ASTContext.h"
+#include "clang/Sema/CodeCompleteConsumer.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/Sema.h"
@@ -159,7 +160,8 @@ namespace cling {
                              bool enableExternalSemaSourceCallbacks/* = false*/,
                         bool enableDeserializationListenerCallbacks/* = false*/,
                                              bool enablePPCallbacks/* = false*/)
-    : m_Interpreter(interp), m_IsRuntime(false) {
+    : m_Interpreter(interp), m_ExternalSemaSource(0), m_PPCallbacks(0),
+      m_IsRuntime(false) {
     Sema& SemaRef = interp->getSema();
     ASTReader* Reader = m_Interpreter->getCI()->getModuleManager().get();
     ExternalSemaSource* externalSemaSrc = SemaRef.getExternalSource();
@@ -190,9 +192,9 @@ namespace cling {
     }
 
     if (enablePPCallbacks) {
-      m_PPCallbacks = new InterpreterPPCallbacks(this);
       Preprocessor& PP = m_Interpreter->getCI()->getPreprocessor();
-      PP.addPPCallbacks(m_PPCallbacks);
+      m_PPCallbacks = new InterpreterPPCallbacks(this);
+      PP.addPPCallbacks(std::unique_ptr<InterpreterPPCallbacks>(m_PPCallbacks));
     }
   }
 
@@ -298,15 +300,23 @@ namespace test {
     printf("%s", "\n");
   }
 
-  SymbolResolverCallback::SymbolResolverCallback(Interpreter* interp)
-    : InterpreterCallbacks(interp), m_TesterDecl(0) {
+  SymbolResolverCallback::SymbolResolverCallback(Interpreter* interp,
+                                                 bool resolve)
+    : InterpreterCallbacks(interp), m_Resolve(resolve), m_TesterDecl(0) {
     m_Interpreter->process("cling::test::Tester = new cling::test::TestProxy();");
   }
 
   SymbolResolverCallback::~SymbolResolverCallback() { }
 
   bool SymbolResolverCallback::LookupObject(LookupResult& R, Scope* S) {
+    if (!ShouldResolveAtRuntime(R, S))
+      return false;
+
     if (m_IsRuntime) {
+      // We are currently parsing an EvaluateT() expression
+      if (!m_Resolve)
+        return false;
+
       // Only for demo resolve all unknown objects to cling::test::Tester
       if (!m_TesterDecl) {
         clang::Sema& SemaR = m_Interpreter->getSema();
@@ -319,37 +329,45 @@ namespace test {
       return true; // Tell clang to continue.
     }
 
-    if (ShouldResolveAtRuntime(R, S)) {
-      ASTContext& C = R.getSema().getASTContext();
-      DeclContext* DC = 0;
-      // For DeclContext-less scopes like if (dyn_expr) {}
-      while (!DC) {
-        DC = static_cast<DeclContext*>(S->getEntity());
-        S = S->getParent();
-      }
-      DeclarationName Name = R.getLookupName();
-      IdentifierInfo* II = Name.getAsIdentifierInfo();
-      SourceLocation Loc = R.getNameLoc();
-      VarDecl* Res = VarDecl::Create(C, DC, Loc, Loc, II, C.DependentTy,
-                                     /*TypeSourceInfo*/0, SC_None);
-
-      // Annotate the decl to give a hint in cling. FIXME: Current implementation
-      // is a gross hack, because TClingCallbacks shouldn't know about
-      // EvaluateTSynthesizer at all!
-      SourceRange invalidRange;
-      Res->addAttr(new (C) AnnotateAttr(invalidRange, C, "__ResolveAtRuntime", 0));
-      R.addDecl(Res);
-      DC->addDecl(Res);
-      // Say that we can handle the situation. Clang should try to recover
-      return true;
+    // We are currently NOT parsing an EvaluateT() expression.
+    // Escape the expression into an EvaluateT() expression.
+    ASTContext& C = R.getSema().getASTContext();
+    DeclContext* DC = 0;
+    // For DeclContext-less scopes like if (dyn_expr) {}
+    while (!DC) {
+      DC = static_cast<DeclContext*>(S->getEntity());
+      S = S->getParent();
     }
 
-    return false;
+    // DynamicLookup only happens inside topmost functions:
+    clang::DeclContext* TopmostDC = DC;
+    while (!isa<TranslationUnitDecl>(TopmostDC->getParent())) {
+      TopmostDC = TopmostDC->getParent();
+    }
+    FunctionDecl* TopmostFunc = dyn_cast<FunctionDecl>(TopmostDC);
+    if (!TopmostFunc)
+       return false;
+
+    DeclarationName Name = R.getLookupName();
+    IdentifierInfo* II = Name.getAsIdentifierInfo();
+    SourceLocation Loc = R.getNameLoc();
+    VarDecl* Res = VarDecl::Create(C, DC, Loc, Loc, II, C.DependentTy,
+        /*TypeSourceInfo*/0, SC_None);
+
+    // Annotate the decl to give a hint in cling. FIXME: Current implementation
+    // is a gross hack, because TClingCallbacks shouldn't know about
+    // EvaluateTSynthesizer at all!
+    SourceRange invalidRange;
+    TopmostFunc->addAttr(new (C) AnnotateAttr(invalidRange, C,
+                                              "__ResolveAtRuntime", 0));
+    R.addDecl(Res);
+    DC->addDecl(Res);
+    // Say that we can handle the situation. Clang should try to recover
+    return true;
   }
 
   bool SymbolResolverCallback::ShouldResolveAtRuntime(LookupResult& R,
                                                       Scope* S) {
-
     if (R.getLookupKind() != Sema::LookupOrdinaryName)
       return false;
 

@@ -14,20 +14,21 @@
  * listed in LICENSE (http://roofit.sourceforge.net/license.txt)             *
  *****************************************************************************/
 
-//////////////////////////////////////////////////////////////////////////////
-// 
-// BEGIN_HTML 
-// RooChangeTracker is a meta object that tracks value
-// changes in a given set of RooAbsArgs by registering itself as value
-// client of these objects. The change tracker can perform an
-// additional validation step where it also compares the numeric
-// values of the tracked arguments with reference values to ensure
-// that values have actually changed. This may be useful in case some
-// of the tracked observables are in binned datasets where each
-// observable propates a valueDirty flag when an event is loaded even
-// though usually only one observable actually changes.
-// END_HTML
-//
+/**
+\file RooChangeTracker.cxx
+\class RooChangeTracker
+\ingroup Roofitcore
+
+RooChangeTracker is a meta object that tracks value
+changes in a given set of RooAbsArgs by registering itself as value
+client of these objects. The change tracker can perform an
+additional validation step where it also compares the numeric
+values of the tracked arguments with reference values to ensure
+that values have actually changed. This may be useful in case some
+of the tracked observables are in binned datasets where each
+observable propates a valueDirty flag when an event is loaded even
+though usually only one observable actually changes.
+**/
 
 
 #include "RooFit.h"
@@ -46,32 +47,33 @@ using namespace std ;
 ClassImp(RooChangeTracker)
 ;
 
-//_____________________________________________________________________________
-RooChangeTracker::RooChangeTracker() : _checkVal(kFALSE)
-{
-  // Default constructor
+////////////////////////////////////////////////////////////////////////////////
+/// Default constructor
 
+RooChangeTracker::RooChangeTracker() : _checkVal(kFALSE), _init(kFALSE)
+{
   _realSetIter = _realSet.createIterator() ;
   _catSetIter = _catSet.createIterator() ;
 }
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Constructor. The set trackSet contains the observables to be
+/// tracked for changes. If checkValues is true an additional
+/// validation step is activated where the numeric values of the
+/// tracked arguments are compared with reference values ensuring
+/// that values have actually changed.
+
 RooChangeTracker::RooChangeTracker(const char* name, const char* title, const RooArgSet& trackSet, Bool_t checkValues) :
   RooAbsReal(name, title),
   _realSet("realSet","Set of real-valued components to be tracked",this),
   _catSet("catSet","Set of discrete-valued components to be tracked",this),
   _realRef(trackSet.getSize()),
   _catRef(trackSet.getSize()),
-  _checkVal(checkValues)
+  _checkVal(checkValues),
+  _init(kFALSE)
 {
-  // Constructor. The set trackSet contains the observables to be
-  // tracked for changes. If checkValues is true an additional
-  // validation step is activated where the numeric values of the
-  // tracked arguments are compared with reference values ensuring
-  // that values have actually changed.
-
   _realSetIter = _realSet.createIterator() ;
   _catSetIter = _catSet.createIterator() ;
 
@@ -91,6 +93,8 @@ RooChangeTracker::RooChangeTracker(const char* name, const char* title, const Ro
     RooAbsReal* real  ;
     RooAbsCategory* cat  ;
     Int_t i(0) ;
+    _realSetIter->Reset() ;
+    _catSetIter->Reset() ;
     while((real=(RooAbsReal*)_realSetIter->Next())) {
       _realRef[i++] = real->getVal() ;
     }
@@ -104,17 +108,18 @@ RooChangeTracker::RooChangeTracker(const char* name, const char* title, const Ro
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Copy constructor
+
 RooChangeTracker::RooChangeTracker(const RooChangeTracker& other, const char* name) :
   RooAbsReal(other, name), 
   _realSet("realSet",this,other._realSet),
   _catSet("catSet",this,other._catSet),
   _realRef(other._realRef),
   _catRef(other._catRef),
-  _checkVal(other._checkVal)
+  _checkVal(other._checkVal),
+  _init(kFALSE)
 {
-  // Copy constructor
-
   _realSetIter = _realSet.createIterator() ;
   _catSetIter = _catSet.createIterator() ;
 
@@ -125,12 +130,12 @@ RooChangeTracker::RooChangeTracker(const RooChangeTracker& other, const char* na
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Returns true if state has changes since last call with clearState=kTRUE
+/// If clearState is true, changeState flag will be cleared.
+
 Bool_t RooChangeTracker::hasChanged(Bool_t clearState) 
 {
-  // Returns true if state has changes since last call with clearState=kTRUE
-  // If clearState is true, changeState flag will be cleared.
-
 
   // If dirty flag did not change, object has not changed in any case
   if (!isValueDirty()) {
@@ -164,23 +169,32 @@ Bool_t RooChangeTracker::hasChanged(Bool_t clearState)
 
     // Check if any of the real values changed
     while ((real=(RooAbsReal*)_realSetIter->Next())) {
-      if (real->getVal() != _realRef[i++]) {
-	//cout << "RooChangeTracker(" << GetName() << ") value of " << real->GetName() << " has changed from " << _realRef[i-1] << " to " << real->getVal() << endl ;
+      if (real->getVal() != _realRef[i]) {
+	// cout << "RooChangeTracker(" << this << "," << GetName() << ") value of " << real->GetName() << " has changed from " << _realRef[i] << " to " << real->getVal() << " clearState = " << (clearState?"T":"F") << endl ;
 	valuesChanged = kTRUE ;
-	_realRef[i-1] = real->getVal() ;
+	_realRef[i] = real->getVal() ;
       }
+      i++ ;
     }
     // Check if any of the categories changed
     i=0 ;
     while ((cat=(RooAbsCategory*)_catSetIter->Next())) {
       if (cat->getIndex() != _catRef[i++]) {
-	//cout << "RooChangeTracker(" << GetName() << ") value of " << cat->GetName() << " has changed from " << _catRef[i-1] << " to " << cat->getIndex() << endl ;
+	// cout << "RooChangeTracker(" << this << "," << GetName() << ") value of " << cat->GetName() << " has changed from " << _catRef[i-1] << " to " << cat->getIndex() << endl ;
 	valuesChanged = kTRUE ;
 	_catRef[i-1] = cat->getIndex() ;
       }
     }
 
     clearValueDirty() ;
+
+
+    if (!_init) {
+      valuesChanged=kTRUE ;
+      _init = kTRUE ;
+    }
+    
+    // cout << "RooChangeTracker(" << GetName() << ") returning " << (valuesChanged?"T":"F") << endl ;
 
     return valuesChanged ;
 
@@ -209,17 +223,19 @@ Bool_t RooChangeTracker::hasChanged(Bool_t clearState)
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Destructor
+
 RooChangeTracker::~RooChangeTracker() 
 {
-  // Destructor
   if (_realSetIter) delete _realSetIter ;
   if (_catSetIter) delete _catSetIter ;
 }
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+
 RooArgSet RooChangeTracker::parameters() const 
 {
   RooArgSet ret ;

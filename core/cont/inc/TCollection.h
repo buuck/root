@@ -22,17 +22,11 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TObject
 #include "TObject.h"
-#endif
 
-#ifndef ROOT_TIterator
 #include "TIterator.h"
-#endif
 
-#ifndef ROOT_TString
 #include "TString.h"
-#endif
 
 
 class TClass;
@@ -170,7 +164,7 @@ public:
    Bool_t             operator!=(const TIter &aIter) const {
       return !(*this == aIter);
    }
-   TObject           *operator*() const { return *(*fIterator); }
+   TObject           *operator*() const { return fIterator ? *(*fIterator): nullptr; }
    TIter             &Begin();
    static TIter       End();
 

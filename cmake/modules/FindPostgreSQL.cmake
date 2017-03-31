@@ -11,23 +11,22 @@
 # For details see the accompanying COPYING-CMAKE-SCRIPTS file.
 
 
-if (POSTGRESQL_INCLUDE_DIR AND POSTGRESQL_LIBRARIES)
-  # Already in cache, be silent
-  set(PostgreSQL_FIND_QUIETLY TRUE)
-endif (POSTGRESQL_INCLUDE_DIR AND POSTGRESQL_LIBRARIES)
-
-
 find_path(POSTGRESQL_INCLUDE_DIR libpq-fe.h
-   /usr/include/pgsql/
-   /usr/local/include/pgsql/
-   /usr/include/postgresql/
+   HINTS ${POSTGRESQL_DIR}/include $ENV{POSTGRESQL_DIR}/include
+   PATH_SUFFIXES pgsql pgsql/server postgresql postgresql/server
 )
 
-find_library(POSTGRESQL_LIBRARIES NAMES pq)
+find_library(POSTGRESQL_LIBRARY NAMES pq
+    HINTS ${POSTGRESQL_DIR}/lib $ENV{POSTGRESQL_DIR}/lib
+    PATH_SUFFIXES pgsql posgresql
+)
+
+if(POSTGRESQL_LIBRARY)
+  set(POSTGRESQL_LIBRARIES ${POSTGRESQL_LIBRARY})
+endif()
 
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(PostgreSQL DEFAULT_MSG
-                                  POSTGRESQL_INCLUDE_DIR POSTGRESQL_LIBRARIES )
+                                  POSTGRESQL_INCLUDE_DIR POSTGRESQL_LIBRARY)
 
-mark_as_advanced(POSTGRESQL_INCLUDE_DIR POSTGRESQL_LIBRARIES)
-
+mark_as_advanced(POSTGRESQL_INCLUDE_DIR POSTGRESQL_LIBRARY)

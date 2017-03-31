@@ -33,7 +33,6 @@
 #include "llvm/PassAnalysisSupport.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetRegisterInfo.h"
 #include <cstdlib>
 #include <queue>
@@ -134,8 +133,8 @@ RABasic::RABasic(): MachineFunctionPass(ID) {
 
 void RABasic::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesCFG();
-  AU.addRequired<AliasAnalysis>();
-  AU.addPreserved<AliasAnalysis>();
+  AU.addRequired<AAResultsWrapperPass>();
+  AU.addPreserved<AAResultsWrapperPass>();
   AU.addRequired<LiveIntervals>();
   AU.addPreserved<LiveIntervals>();
   AU.addPreserved<SlotIndexes>();
@@ -200,7 +199,7 @@ bool RABasic::spillInterferences(LiveInterval &VirtReg, unsigned PhysReg,
     Matrix->unassign(Spill);
 
     // Spill the extracted interval.
-    LiveRangeEdit LRE(&Spill, SplitVRegs, *MF, *LIS, VRM);
+    LiveRangeEdit LRE(&Spill, SplitVRegs, *MF, *LIS, VRM, nullptr, &DeadRemats);
     spiller().spill(LRE);
   }
   return true;
@@ -224,7 +223,7 @@ unsigned RABasic::selectOrSplit(LiveInterval &VirtReg,
   SmallVector<unsigned, 8> PhysRegSpillCands;
 
   // Check for an available register in this class.
-  AllocationOrder Order(VirtReg.reg, *VRM, RegClassInfo);
+  AllocationOrder Order(VirtReg.reg, *VRM, RegClassInfo, Matrix);
   while (unsigned PhysReg = Order.next()) {
     // Check for interference in PhysReg
     switch (Matrix->checkInterference(VirtReg, PhysReg)) {
@@ -259,7 +258,7 @@ unsigned RABasic::selectOrSplit(LiveInterval &VirtReg,
   DEBUG(dbgs() << "spilling: " << VirtReg << '\n');
   if (!VirtReg.isSpillable())
     return ~0u;
-  LiveRangeEdit LRE(&VirtReg, SplitVRegs, *MF, *LIS, VRM);
+  LiveRangeEdit LRE(&VirtReg, SplitVRegs, *MF, *LIS, VRM, nullptr, &DeadRemats);
   spiller().spill(LRE);
 
   // The live virtual register requesting allocation was spilled, so tell
@@ -277,13 +276,14 @@ bool RABasic::runOnMachineFunction(MachineFunction &mf) {
                      getAnalysis<LiveIntervals>(),
                      getAnalysis<LiveRegMatrix>());
 
-  calculateSpillWeightsAndHints(*LIS, *MF,
+  calculateSpillWeightsAndHints(*LIS, *MF, VRM,
                                 getAnalysis<MachineLoopInfo>(),
                                 getAnalysis<MachineBlockFrequencyInfo>());
 
   SpillerInstance.reset(createInlineSpiller(*this, *MF, *VRM));
 
   allocatePhysRegs();
+  postOptimization();
 
   // Diagnostic output before rewriting
   DEBUG(dbgs() << "Post alloc VirtRegMap:\n" << *VRM << "\n");

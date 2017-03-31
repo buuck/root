@@ -83,9 +83,9 @@ public:
   }
 
   void VisitChildren(Stmt *S) {
-    for (Stmt::child_range I = S->children(); I; ++I)
-      if (*I)
-        static_cast<CGBuilder*>(this)->Visit(*I);
+    for (Stmt *SubStmt : S->children())
+      if (SubStmt)
+        this->Visit(SubStmt);
   }
 };
 
@@ -110,23 +110,17 @@ CallGraph::~CallGraph() {
 
 bool CallGraph::includeInGraph(const Decl *D) {
   assert(D);
-  if (!D->getBody())
+  if (!D->hasBody())
     return false;
 
   if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
     // We skip function template definitions, as their semantics is
     // only determined when they are instantiated.
-    if (!FD->isThisDeclarationADefinition() ||
-        FD->isDependentContext())
+    if (FD->isDependentContext())
       return false;
 
     IdentifierInfo *II = FD->getIdentifier();
     if (II && II->getName().startswith("__inline"))
-      return false;
-  }
-
-  if (const ObjCMethodDecl *ID = dyn_cast<ObjCMethodDecl>(D)) {
-    if (!ID->isThisDeclarationADefinition())
       return false;
   }
 
@@ -152,6 +146,9 @@ CallGraphNode *CallGraph::getNode(const Decl *F) const {
 }
 
 CallGraphNode *CallGraph::getOrInsertNode(Decl *F) {
+  if (F && !isa<ObjCMethodDecl>(F))
+    F = F->getCanonicalDecl();
+
   CallGraphNode *&Node = FunctionMap[F];
   if (Node)
     return Node;
@@ -191,7 +188,7 @@ void CallGraph::print(raw_ostream &OS) const {
   OS.flush();
 }
 
-void CallGraph::dump() const {
+LLVM_DUMP_METHOD void CallGraph::dump() const {
   print(llvm::errs());
 }
 
@@ -205,7 +202,7 @@ void CallGraphNode::print(raw_ostream &os) const {
   os << "< >";
 }
 
-void CallGraphNode::dump() const {
+LLVM_DUMP_METHOD void CallGraphNode::dump() const {
   print(llvm::errs());
 }
 

@@ -1,4 +1,4 @@
-#ifndef WIN32
+#ifndef _WIN32
 
 //===--- TerminalConfigUnix.cpp - termios storage -------------*- C++ -*-===//
 //
@@ -44,7 +44,11 @@ const int TerminalConfigUnix::fgSignals[kNumHandledSignals] = {
   SIGABRT,
   SIGSEGV,
   SIGILL,
-  SIGBUS
+  SIGBUS,
+  SIGQUIT,
+  SIGFPE,
+  SIGXCPU,
+  SIGXFSZ
 };
 
 TerminalConfigUnix&
@@ -143,4 +147,4 @@ bool TerminalConfigUnix::IsInteractive() const {
 
 
 
-#endif // ndef WIN32
+#endif // ifndef _WIN32

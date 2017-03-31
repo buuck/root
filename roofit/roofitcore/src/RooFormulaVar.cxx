@@ -46,7 +46,7 @@
 #include "RooNLLVar.h"
 #include "RooChi2Var.h"
 #include "RooMsgService.h"
-
+#include "RooTrace.h"
 
 
 using namespace std;
@@ -55,14 +55,14 @@ ClassImp(RooFormulaVar)
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Constructor with formula expression and list of input variables
+
 RooFormulaVar::RooFormulaVar(const char *name, const char *title, const char* inFormula, const RooArgList& dependents) : 
   RooAbsReal(name,title), 
   _actualVars("actualVars","Variables used by formula expression",this),
   _formula(0), _formExpr(inFormula)
 {  
-  // Constructor with formula expression and list of input variables
-
   _actualVars.add(dependents) ; 
 
   if (_actualVars.getSize()==0) _value = traceEval(0) ;
@@ -70,14 +70,14 @@ RooFormulaVar::RooFormulaVar(const char *name, const char *title, const char* in
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Constructor with formula expression, title and list of input variables
+
 RooFormulaVar::RooFormulaVar(const char *name, const char *title, const RooArgList& dependents) : 
   RooAbsReal(name,title),
   _actualVars("actualVars","Variables used by formula expression",this),
   _formula(0), _formExpr(title)
 {  
-  // Constructor with formula expression, title and list of input variables
-
   _actualVars.add(dependents) ; 
 
   if (_actualVars.getSize()==0) _value = traceEval(0) ;
@@ -85,32 +85,33 @@ RooFormulaVar::RooFormulaVar(const char *name, const char *title, const RooArgLi
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Copy constructor
+
 RooFormulaVar::RooFormulaVar(const RooFormulaVar& other, const char* name) : 
   RooAbsReal(other, name), 
   _actualVars("actualVars",this,other._actualVars),
   _formula(0), _formExpr(other._formExpr)
 {
-  // Copy constructor
 }
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Destructor
+
 RooFormulaVar::~RooFormulaVar() 
 {
-  // Destructor
-
   if (_formula) delete _formula ;
 }
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Return reference to internal RooFormula object
+
 RooFormula& RooFormulaVar::formula() const
 {
-  // Return reference to internal RooFormula object
-
   if (!_formula) {
     _formula = new RooFormula(GetName(),_formExpr,_actualVars) ;    
   }
@@ -119,38 +120,41 @@ RooFormula& RooFormulaVar::formula() const
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Calculate current value of object from internal formula
+
 Double_t RooFormulaVar::evaluate() const
 {
-  // Calculate current value of object from internal formula
   return formula().eval(_lastNSet) ;
 }
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Check if given value is valid
+
 Bool_t RooFormulaVar::isValidReal(Double_t /*value*/, Bool_t /*printError*/) const 
 {
-  // Check if given value is valid
   return kTRUE ;
 }
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Propagate server change information to embedded RooFormula object
+
 Bool_t RooFormulaVar::redirectServersHook(const RooAbsCollection& newServerList, Bool_t mustReplaceAll, Bool_t nameChange, Bool_t /*isRecursive*/)
 {
-  // Propagate server change information to embedded RooFormula object
-  return _formula ? _formula->changeDependents(newServerList,mustReplaceAll,nameChange) : kFALSE ;
+  return formula().changeDependents(newServerList,mustReplaceAll,nameChange) ;
 }
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Print info about this object to the specified stream.   
+
 void RooFormulaVar::printMultiline(ostream& os, Int_t contents, Bool_t verbose, TString indent) const
 {
-  // Print info about this object to the specified stream.   
-
   RooAbsReal::printMultiline(os,contents,verbose,indent);
   if(verbose) {
     indent.Append("  ");
@@ -161,32 +165,33 @@ void RooFormulaVar::printMultiline(ostream& os, Int_t contents, Bool_t verbose, 
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Add formula expression as meta argument in printing interface
+
 void RooFormulaVar::printMetaArgs(ostream& os) const 
 {
-  // Add formula expression as meta argument in printing interface
   os << "formula=\"" << _formExpr << "\" " ;
 }
 
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Read object contents from given stream
+
 Bool_t RooFormulaVar::readFromStream(istream& /*is*/, Bool_t /*compact*/, Bool_t /*verbose*/)
 {
-  // Read object contents from given stream
-
   coutE(InputArguments) << "RooFormulaVar::readFromStream(" << GetName() << "): can't read" << endl ;
   return kTRUE ;
 }
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Write object contents to given stream
+
 void RooFormulaVar::writeToStream(ostream& os, Bool_t compact) const
 {
-  // Write object contents to given stream
-
   if (compact) {
     cout << getVal() << endl ;
   } else {
@@ -195,17 +200,56 @@ void RooFormulaVar::writeToStream(ostream& os, Bool_t compact) const
 }
 
 
-//_____________________________________________________________________________
+
+////////////////////////////////////////////////////////////////////////////////
+/// Forward the plot sampling hint from the p.d.f. that defines the observable obs  
+
+std::list<Double_t>* RooFormulaVar::binBoundaries(RooAbsRealLValue& obs, Double_t xlo, Double_t xhi) const
+{
+  RooFIter iter = _actualVars.fwdIterator() ;
+  RooAbsReal* func ;
+  while((func=(RooAbsReal*)iter.next())) {
+    list<Double_t>* binb = func->binBoundaries(obs,xlo,xhi) ;      
+    if (binb) {
+      return binb ;
+    }
+  }
+  
+  return 0 ;  
+}
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+/// Forward the plot sampling hint from the p.d.f. that defines the observable obs  
+
+std::list<Double_t>* RooFormulaVar::plotSamplingHint(RooAbsRealLValue& obs, Double_t xlo, Double_t xhi) const
+{
+  RooFIter iter = _actualVars.fwdIterator() ;
+  RooAbsReal* func ;
+  while((func=(RooAbsReal*)iter.next())) {
+    list<Double_t>* hint = func->plotSamplingHint(obs,xlo,xhi) ;      
+    if (hint) {
+      return hint ;
+    }
+  }
+  
+  return 0 ;
+}
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+/// Return the default error level for MINUIT error analysis
+/// If the formula contains one or more RooNLLVars and 
+/// no RooChi2Vars, return the defaultErrorLevel() of
+/// RooNLLVar. If the addition contains one ore more RooChi2Vars
+/// and no RooNLLVars, return the defaultErrorLevel() of
+/// RooChi2Var. If the addition contains neither or both
+/// issue a warning message and return a value of 1
+
 Double_t RooFormulaVar::defaultErrorLevel() const 
 {
-  // Return the default error level for MINUIT error analysis
-  // If the formula contains one or more RooNLLVars and 
-  // no RooChi2Vars, return the defaultErrorLevel() of
-  // RooNLLVar. If the addition contains one ore more RooChi2Vars
-  // and no RooNLLVars, return the defaultErrorLevel() of
-  // RooChi2Var. If the addition contains neither or both
-  // issue a warning message and return a value of 1
-
   RooAbsReal* nllArg(0) ;
   RooAbsReal* chi2Arg(0) ;
 

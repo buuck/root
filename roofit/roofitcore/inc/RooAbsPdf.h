@@ -251,6 +251,15 @@ protected:
 
 public:
   virtual const RooAbsReal* getNormObj(const RooArgSet* set, const RooArgSet* iset, const TNamed* rangeName=0) const ;
+
+  virtual RooAbsGenContext* binnedGenContext(const RooArgSet &vars, Bool_t verbose= kFALSE) const ;
+
+  virtual RooAbsGenContext* genContext(const RooArgSet &vars, const RooDataSet *prototype=0, 
+	                               const RooArgSet* auxProto=0, Bool_t verbose= kFALSE) const ;
+
+  virtual RooAbsGenContext* autoGenContext(const RooArgSet &vars, const RooDataSet* prototype=0, const RooArgSet* auxProto=0, 
+					   Bool_t verbose=kFALSE, Bool_t autoBinned=kTRUE, const char* binnedTag="") const ;
+
 protected:
 
   RooDataSet *generate(RooAbsGenContext& context, const RooArgSet& whatVars, const RooDataSet* prototype,
@@ -262,8 +271,6 @@ protected:
                            const char *label= "", Int_t sigDigits = 2, Option_t *options = "NELU", Double_t xmin=0.65,
 			   Double_t xmax= 0.99,Double_t ymax=0.95, const RooCmdArg* formatCmd=0) ;
 
-
-  void plotOnCompSelect(RooArgSet* selNodes) const ;
 
   virtual RooPlot *plotOn(RooPlot *frame, PlotOpt o) const;  
 
@@ -279,15 +286,6 @@ protected:
   friend class RooMCStudy ;
 
   Int_t* randomizeProtoOrder(Int_t nProto,Int_t nGen,Bool_t resample=kFALSE) const ;
-
-  virtual RooAbsGenContext* binnedGenContext(const RooArgSet &vars, Bool_t verbose= kFALSE) const ;
-
-  virtual RooAbsGenContext* genContext(const RooArgSet &vars, const RooDataSet *prototype=0, 
-	                               const RooArgSet* auxProto=0, Bool_t verbose= kFALSE) const ;
-
-  virtual RooAbsGenContext* autoGenContext(const RooArgSet &vars, const RooDataSet* prototype=0, const RooArgSet* auxProto=0, 
-					   Bool_t verbose=kFALSE, Bool_t autoBinned=kTRUE, const char* binnedTag="") const ;
-
 
   friend class RooExtendPdf ;
   // This also forces the definition of a copy ctor in derived classes 

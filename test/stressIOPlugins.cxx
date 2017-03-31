@@ -12,20 +12,24 @@
 //   tested via tests based on some of stress.cxx tests.
 //
 //   Can be run as:
-//     stressIOPlugins
 //     stressIOPlugins [name]
 //
 //   The name parameter is a protocol name, as expected
-//   in a url. The supported names are: xroot, root, http, https
-//   If the name is omitted a selection of schemes are
+//   in a url. The supported names are: xroot, root, http, https,
+//   rfio. If the name is omitted a selection of schemes are
 //   tested based on feature availability:
 //
-//           feature          protocol
+//           feature          protocol    multithreaded test available
 //
-//            xrootd           root
-//            davix            http
+//            xrootd           root                no
+//            davix            http                no
+//            rfio(*)          rfio                no
 //
-// An example of output when all the tests run OK is shown below:
+// (*) Also requires a cern.ch kerberos token for sftnight to run the test,
+//     and rfio is not selected unless explicitly given as [name]
+//
+// An example of output of a non multithreaded test, when all the tests
+// run OK is shown below:
 //
 // ****************************************************************************
 // *  Starting stressIOPlugins test for protocol http
@@ -43,6 +47,14 @@
 //         : Trees split and compression modes..................... using Event_8b.root
 //         : opened file with plugin class......................... TDavixFile
 //         : Trees split and compression modes..................... OK
+// Test  4 : Filename formats when adding files to TChain.......... using Event_8a.root and Event_8b.root
+//         : treename in chain..................................... OK
+//         : treename to AddFile................................... OK
+//         : treename in filenames, slash-suffix style............. OK
+//         : bad treename to AddFile, good in filename............. OK
+//         : treename and url query in filename.................... OK
+//         : treename given in url frag in filename................ OK
+//         : filename with a url query in Add...................... OK
 // ****************************************************************************
 //_____________________________batch only_____________________
 #ifndef __CINT__
@@ -59,6 +71,7 @@
 #include <TCanvas.h>
 #include <TPostScript.h>
 #include <TTree.h>
+#include <TChain.h>
 #include <TTreeCache.h>
 #include <TSystem.h>
 #include <TApplication.h>
@@ -66,11 +79,15 @@
 #include <Compression.h>
 #include "Event.h"
 
+R__LOAD_LIBRARY( libEvent )
+
 void stressIOPlugins();
-void stressIOPluginsForProto(const char *protoName = 0);
+void stressIOPluginsForProto(const char *protoName = 0, int multithread = 0);
 void stressIOPlugins1();
 void stressIOPlugins2();
 void stressIOPlugins3();
+void stressIOPlugins4();
+void stressIOPlugins5();
 void cleanup();
 
 int main(int argc, char **argv)
@@ -88,39 +105,10 @@ int main(int argc, char **argv)
 class TH1;
 class TTree;
 
-#if defined(__CINT__) || defined(__CLING__)
-struct ensureEventLoaded {
-   public:
-   ensureEventLoaded() {
-     // if needed load the Event shard library, making sure it exists
-     // This test dynamic linking when running in interpreted mode
-     if (!TClassTable::GetDict("Event")) {
-        Int_t st1 = -1;
-        if (gSystem->DynamicPathName("$ROOTSYS/test/libEvent",kTRUE)) {
-           st1 = gSystem->Load("$(ROOTSYS)/test/libEvent");
-        }
-        if (st1 == -1) {
-           if (gSystem->DynamicPathName("test/libEvent",kTRUE)) {
-              st1 = gSystem->Load("test/libEvent");
-           }
-           if (st1 == -1) {
-              printf("===>stress8 will try to build the libEvent library\n");
-              Bool_t UNIX = strcmp(gSystem->GetName(), "Unix") == 0;
-              if (UNIX) gSystem->Exec("(cd $ROOTSYS/test; make Event)");
-              else      gSystem->Exec("(cd %ROOTSYS%\\test && nmake libEvent.dll)");
-              st1 = gSystem->Load("$(ROOTSYS)/test/libEvent");
-           }
-        }
-     }
-   }
-   ~ensureEventLoaded() { }
-} myStaticObject;
-#endif
-
 //_______________________ common part_________________________
 
 Double_t ntotin=0, ntotout=0;
-TString gPfx;
+TString gPfx,gCurProtoName;
 
 void Bprint(Int_t id, const char *title)
 {
@@ -167,6 +155,7 @@ int setPath(const char *proto)
 {
    if (!proto) return -1;
    TString p(proto);
+   gCurProtoName = p;
    if (p == "root" || p == "xroot") {
       gPfx = p + "://eospublic.cern.ch//eos/opstest/dhsmith/StressIOPluginsTestFiles/";
       return 0;
@@ -175,10 +164,28 @@ int setPath(const char *proto)
       gPfx = p + "://root.cern.ch/files/StressIOPluginsTestFiles/";
       return 0;
    }
+   if (p == "rfio") {
+      gSystem->Setenv("STAGE_HOST","castorpublic.cern.ch");
+      gPfx = p + ":/castor/cern.ch/user/s/sftnight/StressIOPluginsTestFiles/";
+      return 0;
+   }
    return -1;
 }
 
-void stressIOPluginsForProto(const char *protoName /*=0*/)
+Bool_t running_as_sftnight_with_kerberos() {
+   UserGroup_t *ug = gSystem->GetUserInfo((const char*)0);
+   if (!ug) {
+     return kFALSE;
+   }
+   if (ug->fUser != "sftnight") {
+     delete ug;
+     return kFALSE;
+   }
+   delete ug;
+   return (gSystem->Exec("(klist | grep sftnight@CERN.CH) > /dev/null 2>&1") == 0);
+}
+
+void stressIOPluginsForProto(const char *protoName /*=0*/, int multithread /*=0*/)
 {
    //Main control function invoking all test programs
    if (!protoName) {
@@ -195,8 +202,21 @@ void stressIOPluginsForProto(const char *protoName /*=0*/)
      return;
    }
 
+   if (!strcmp(protoName,"rfio")) {
+     if (!running_as_sftnight_with_kerberos()) {
+       printf("* Skipping protocol test for '%s' because it needs to be "
+              "run as the CERN sftnight user and have its kerberos token\n", protoName);
+       return;
+     }
+   }
+
    if (setPath(protoName)) {
      printf("No server and path available to test protocol %s\n", protoName);
+     return;
+   }
+
+   if (multithread) {
+     printf("No multithreaded tests are available\n");
      return;
    }
 
@@ -209,6 +229,8 @@ void stressIOPluginsForProto(const char *protoName /*=0*/)
    stressIOPlugins1();
    stressIOPlugins2();
    stressIOPlugins3();
+   stressIOPlugins4();
+   stressIOPlugins5();
 
    cleanup();
 
@@ -217,14 +239,15 @@ void stressIOPluginsForProto(const char *protoName /*=0*/)
 
 void stressIOPlugins()
 {
-   stressIOPluginsForProto((const char*)0);
+   stressIOPluginsForProto((const char*)0,0);
 }
 
-//_______________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+///based on stress2()
+///check length and compression factor in stress.root
+
 void stressIOPlugins1()
 {
-   //based on stress2()
-   //check length and compression factor in stress.root
    const char *title = "Check size & compression factor of a Root file";
    Bprint(1, title);
 
@@ -248,27 +271,28 @@ void stressIOPlugins1()
    delete f;
 }
 
-//_______________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// based on stress5()
+/// Test of Postscript.
+/// Make a complex picture. Verify number of lines on ps file
+/// Testing automatically the graphics package is a complex problem.
+/// The best way we have found is to generate a Postscript image
+/// of a complex canvas containing many objects.
+/// The number of lines in the ps file is compared with a reference run.
+/// A few lines (up to 2 or 3) of difference may be expected because
+/// Postscript works with floats. The date and time of the run are also
+/// different.
+/// You can also inspect visually the ps file with a ps viewer.
+
 void stressIOPlugins2()
 {
-// based on stress5()
-// Test of Postscript.
-// Make a complex picture. Verify number of lines on ps file
-// Testing automatically the graphics package is a complex problem.
-// The best way we have found is to generate a Postscript image
-// of a complex canvas containing many objects.
-// The number of lines in the ps file is compared with a reference run.
-// A few lines (up to 2 or 3) of difference may be expected because
-// Postscript works with floats. The date and time of the run are also
-// different.
-// You can also inspect visually the ps file with a ps viewer.
-
    const char *title = "Test graphics & Postscript";
    Bprint(2,title);
 
    TCanvas *c1 = new TCanvas("c1","stress canvas",800,600);
    gROOT->LoadClass("TPostScript","Postscript");
-   TPostScript ps("stressIOPlugins.ps",112);
+   TString psfname = TString::Format("stressIOPlugins-%d.ps", gSystem->GetPid());
+   TPostScript ps(psfname,112);
 
    //Get objects generated in previous test
    TFile *f = openTestFile("stress_5.root",title);
@@ -297,7 +321,14 @@ void stressIOPlugins2()
    ps.Close();
 
    //count number of lines in ps file
-   FILE *fp = fopen("stressIOPlugins.ps","r");
+   FILE *fp = fopen(psfname,"r");
+   if (!fp) {
+      printf("FAILED\n");
+      printf("%-8s could not open %s\n"," ",psfname.Data());
+      delete c1;
+      delete f;
+      return;
+   }
    char line[260];
    Int_t nlines = 0;
    Int_t nlinesGood = 632;
@@ -312,16 +343,16 @@ void stressIOPlugins2()
    if (OK) printf("OK\n");
    else    {
       printf("FAILED\n");
-      printf("%-8s nlines in stressIOPlugins.ps file = %d\n"," ",nlines);
+      printf("%-8s nlines in %s file = %d\n"," ",psfname.Data(),nlines);
    }
    delete c1;
    delete f;
 }
 
-//_______________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+
 Int_t test3read(const TString &fn, const char *title)
 {
-
 //  Read the event file
 //  Loop on all events in the file (reading everything).
 //  Count number of bytes read
@@ -355,10 +386,11 @@ Int_t test3read(const TString &fn, const char *title)
 }
 
 
-//_______________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// based on stress8()
+
 void stressIOPlugins3()
 {
-   // based on stress8()
    const char *title = "Trees split and compression modes";
    Bprint(3,title);
 
@@ -377,7 +409,223 @@ void stressIOPlugins3()
    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
+void stressIOPlugins4()
+{
+   Long64_t nent;
+   Bool_t tryquery = kTRUE;
+   Bool_t trywildcard = kFALSE;
+   Bool_t tryqueryInAdd = kFALSE;
+   Bool_t tryziparchive = kFALSE;
+
+   const char *title = "Filename formats when adding files to TChain";
+   Bprint(4,title);
+   printf("using Event_8a.root and Event_8b.root\n");
+
+   if (gCurProtoName == "rfio") {
+      tryquery = kFALSE;
+      trywildcard = kTRUE;
+   }
+
+   if (gCurProtoName == "xroot" || gCurProtoName == "root") {
+      trywildcard = kTRUE;
+      tryziparchive = kTRUE;
+   }
+
+   if (gCurProtoName == "http" || gCurProtoName == "https") {
+      tryqueryInAdd = kTRUE;
+   }
+
+   {
+      Bprint(0,"treename in chain");
+      TChain  mychain("T");
+      mychain.AddFile(gPfx + "Event_8a.root");
+      mychain.AddFile(gPfx + "Event_8b.root");
+      nent = mychain.GetEntries();
+      if (nent != 200) {
+         printf("FAILED\n");
+      } else {
+         printf("OK\n");
+      }
+   }
+   {
+      Bprint(0,"treename to AddFile");
+      TChain  mychain("nosuchtree");
+      mychain.AddFile(gPfx + "Event_8a.root", TTree::kMaxEntries, "T");
+      mychain.AddFile(gPfx + "Event_8b.root", TTree::kMaxEntries, "T");
+      nent = mychain.GetEntries();
+      if (nent != 200) {
+         printf("FAILED\n");
+      } else {
+         printf("OK\n");
+      }
+   }
+   {
+      Bprint(0,"treename in filenames, slash-suffix style");
+      TChain  mychain("nosuchtree");
+      mychain.AddFile(gPfx + "Event_8a.root/T");
+      mychain.AddFile(gPfx + "Event_8b.root/T");
+      nent = mychain.GetEntries();
+      if (nent != 200) {
+         printf("FAILED\n");
+      } else {
+         printf("OK\n");
+      }
+   }
+   {
+      Bprint(0,"bad treename to AddFile, good in filename");
+      TChain  mychain("nosuchtree");
+      mychain.AddFile(gPfx + "Event_8a.root/T", TTree::kMaxEntries, "nosuchtree2");
+      mychain.AddFile(gPfx + "Event_8b.root/T", TTree::kMaxEntries, "nosuchtree2");
+      nent = mychain.GetEntries();
+      if (nent != 200) {
+         printf("FAILED\n");
+      } else {
+         printf("OK\n");
+      }
+   }
+   if (tryquery) {
+      Bprint(0,"treename and url query in filename");
+      TChain  mychain("nosuchtree");
+      mychain.AddFile(gPfx + "Event_8a.root/T?myq=xyz");
+      mychain.AddFile(gPfx + "Event_8b.root/T?myq=xyz");
+      nent = mychain.GetEntries();
+      if (nent != 200) {
+         printf("FAILED\n");
+      } else {
+         printf("OK\n");
+      }
+   }
+   if (tryquery) {
+      Bprint(0,"treename given in url frag in filename");
+      TChain  mychain("nosuchtree");
+      mychain.AddFile(gPfx + "Event_8a.root?myq=xyz#T");
+      mychain.AddFile(gPfx + "Event_8b.root?myq=xyz#T");
+      nent = mychain.GetEntries();
+      if (nent != 200) {
+         printf("FAILED\n");
+      } else {
+         printf("OK\n");
+      }
+   }
+   if (tryqueryInAdd) {
+      Bprint(0,"filename with a url query in Add");
+      TChain  mychain("T");
+      mychain.Add(gPfx + "Event_8a.root?myq=xyz");
+      mychain.Add(gPfx + "Event_8b.root?myq=xyz");
+      nent = mychain.GetEntries();
+      if (nent != 200) {
+         printf("FAILED\n");
+      } else {
+         printf("OK\n");
+      }
+   }
+   if (trywildcard) {
+      Bprint(0,"wildcarded filename");
+      TChain  mychain("T");
+      mychain.Add(gPfx + "Event_8*ot");
+      nent = mychain.GetEntries();
+      if (nent != 200) {
+         printf("FAILED\n");
+      } else {
+         printf("OK\n");
+      }
+   }
+
+   if (trywildcard) {
+      Bprint(0,"wildcarded filename with treename");
+      TChain  mychain("nosuchtree");
+      mychain.Add(gPfx + "Event_8*.root/T");
+      nent = mychain.GetEntries();
+      if (nent != 200) {
+         printf("FAILED\n");
+      } else {
+         printf("OK\n");
+      }
+   }
+   if (tryziparchive) {
+      Bprint(0,"zip archive");
+      printf("using multi_8.zip\n");
+
+      Bprint(0,"sub-file name in fragment");
+      {
+         TChain  mychain("T");
+         mychain.Add(gPfx + "multi_8.zip#Event_8a.root");
+         nent = mychain.GetEntries();
+         if (nent != 100) {
+            printf("FAILED\n");
+         } else {
+            printf("OK\n");
+         }
+      }
+      Bprint(0,"sub-file index in query");
+      {
+         TChain  mychain("T");
+         mychain.AddFile(gPfx + "multi_8.zip?myq=xyz&zip=0");
+         nent = mychain.GetEntries();
+         if (nent != 100) {
+            printf("FAILED\n");
+         } else {
+            printf("OK\n");
+         }
+      }
+   }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void stressIOPlugins5()
+{
+   Bool_t tryziparchive = kFALSE;
+   const char *title = "Read content from a zip archive";
+   Bprint(5,title);
+
+   if (gCurProtoName == "xroot" || gCurProtoName == "root") {
+      tryziparchive = kTRUE;
+   }
+
+   if (!tryziparchive) {
+      printf("skipping\n");
+      return;
+   }
+
+   TFile *hfile = openTestFile("multi_8.zip?&zip=1","find tree");
+   if (!hfile) {
+      printf("FAILED\n");
+      return;
+   }
+   TTree *tree = 0;
+   hfile->GetObject("T",tree);
+   if (!tree) {
+      printf("FAILED\n");
+      delete hfile;
+      return;
+   }
+   tree->SetCacheSize(0);
+   Int_t nentries = (Int_t)tree->GetEntries();
+   if (nentries != 100) {
+      printf("FAILED\n");
+      delete hfile;
+      return;
+   } else {
+      printf("OK\n");
+   }
+   Event *event = 0;
+   tree->SetBranchAddress("event",&event);
+   tree->GetEntry(0);
+   Bprint(0,"read event (no cache)");
+   if (!event || event->GetNtrack() != 603) {
+      printf("FAILED\n");
+   } else {
+      printf("OK\n");
+   }
+   delete event;
+   delete hfile;
+}
+
 void cleanup()
 {
-   gSystem->Unlink("stressIOPlugins.ps");
+   TString psfname = TString::Format("stressIOPlugins-%d.ps", gSystem->GetPid());
+   gSystem->Unlink(psfname);
 }

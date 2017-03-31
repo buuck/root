@@ -18,27 +18,27 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_CODEGEN_LIVEDEBUGVARIABLES_H
-#define LLVM_CODEGEN_LIVEDEBUGVARIABLES_H
+#ifndef LLVM_LIB_CODEGEN_LIVEDEBUGVARIABLES_H
+#define LLVM_LIB_CODEGEN_LIVEDEBUGVARIABLES_H
 
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/IR/DebugInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/IR/DebugInfo.h"
 
 namespace llvm {
 
+template <typename T> class ArrayRef;
 class LiveInterval;
 class LiveIntervals;
 class VirtRegMap;
 
-class LiveDebugVariables : public MachineFunctionPass {
+class LLVM_LIBRARY_VISIBILITY LiveDebugVariables : public MachineFunctionPass {
   void *pImpl;
-  DenseMap<const Function*, DISubprogram> FunctionDIs;
+
 public:
   static char ID; // Pass identification, replacement for typeid
 
   LiveDebugVariables();
-  ~LiveDebugVariables();
+  ~LiveDebugVariables() override;
 
   /// renameRegister - Move any user variables in OldReg to NewReg:SubIdx.
   /// @param OldReg Old virtual register that is going away.
@@ -72,4 +72,4 @@ private:
 
 } // namespace llvm
 
-#endif // LLVM_CODEGEN_LIVEDEBUGVARIABLES_H
+#endif

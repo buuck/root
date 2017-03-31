@@ -12,8 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CODEGEN_DAGPATTERNS_H
-#define CODEGEN_DAGPATTERNS_H
+#ifndef LLVM_UTILS_TABLEGEN_CODEGENDAGPATTERNS_H
+#define LLVM_UTILS_TABLEGEN_CODEGENDAGPATTERNS_H
 
 #include "CodeGenIntrinsics.h"
 #include "CodeGenTarget.h"
@@ -132,13 +132,24 @@ namespace EEVT {
     /// this an other based on this information.
     bool EnforceSmallerThan(EEVT::TypeSet &Other, TreePattern &TP);
 
-    /// EnforceVectorEltTypeIs - 'this' is now constrainted to be a vector type
+    /// EnforceVectorEltTypeIs - 'this' is now constrained to be a vector type
     /// whose element is VT.
     bool EnforceVectorEltTypeIs(EEVT::TypeSet &VT, TreePattern &TP);
 
-    /// EnforceVectorSubVectorTypeIs - 'this' is now constrainted to
+    /// EnforceVectorEltTypeIs - 'this' is now constrained to be a vector type
+    /// whose element is VT.
+    bool EnforceVectorEltTypeIs(MVT::SimpleValueType VT, TreePattern &TP);
+
+    /// EnforceVectorSubVectorTypeIs - 'this' is now constrained to
     /// be a vector type VT.
     bool EnforceVectorSubVectorTypeIs(EEVT::TypeSet &VT, TreePattern &TP);
+
+    /// EnforceVectorSameNumElts - 'this' is now constrained to
+    /// be a vector with same num elements as VT.
+    bool EnforceVectorSameNumElts(EEVT::TypeSet &VT, TreePattern &TP);
+
+    /// EnforceSameSize - 'this' is now constrained to be the same size as VT.
+    bool EnforceSameSize(EEVT::TypeSet &VT, TreePattern &TP);
 
     bool operator!=(const TypeSet &RHS) const { return TypeVec != RHS.TypeVec; }
     bool operator==(const TypeSet &RHS) const { return TypeVec == RHS.TypeVec; }
@@ -165,7 +176,7 @@ struct SDTypeConstraint {
   enum {
     SDTCisVT, SDTCisPtrTy, SDTCisInt, SDTCisFP, SDTCisVec, SDTCisSameAs,
     SDTCisVTSmallerThanOp, SDTCisOpSmallerThanOp, SDTCisEltOfVec,
-    SDTCisSubVecOfVec
+    SDTCisSubVecOfVec, SDTCVecEltisVT, SDTCisSameNumEltsAs, SDTCisSameSizeAs
   } ConstraintType;
 
   union {   // The discriminated union.
@@ -187,6 +198,15 @@ struct SDTypeConstraint {
     struct {
       unsigned OtherOperandNum;
     } SDTCisSubVecOfVec_Info;
+    struct {
+      MVT::SimpleValueType VT;
+    } SDTCVecEltisVT_Info;
+    struct {
+      unsigned OtherOperandNum;
+    } SDTCisSameNumEltsAs_Info;
+    struct {
+      unsigned OtherOperandNum;
+    } SDTCisSameSizeAs_Info;
   } x;
 
   /// ApplyTypeConstraint - Given a node in a pattern, apply this type
@@ -597,7 +617,7 @@ public:
 
   /// error - If this is the first error in the current resolution step,
   /// print it and set the error flag.  Otherwise, continue silently.
-  void error(const std::string &Msg);
+  void error(const Twine &Msg);
   bool hasError() const {
     return HasError;
   }
@@ -702,7 +722,8 @@ class CodeGenDAGPatterns {
   std::map<Record*, SDNodeInfo, LessRecordByID> SDNodes;
   std::map<Record*, std::pair<Record*, std::string>, LessRecordByID> SDNodeXForms;
   std::map<Record*, ComplexPattern, LessRecordByID> ComplexPatterns;
-  std::map<Record*, TreePattern*, LessRecordByID> PatternFragments;
+  std::map<Record *, std::unique_ptr<TreePattern>, LessRecordByID>
+      PatternFragments;
   std::map<Record*, DAGDefaultOperand, LessRecordByID> DefaultOperands;
   std::map<Record*, DAGInstruction, LessRecordByID> Instructions;
 
@@ -716,7 +737,6 @@ class CodeGenDAGPatterns {
   std::vector<PatternToMatch> PatternsToMatch;
 public:
   CodeGenDAGPatterns(RecordKeeper &R);
-  ~CodeGenDAGPatterns();
 
   CodeGenTarget &getTargetInfo() { return Target; }
   const CodeGenTarget &getTargetInfo() const { return Target; }
@@ -778,15 +798,16 @@ public:
   // Pattern Fragment information.
   TreePattern *getPatternFragment(Record *R) const {
     assert(PatternFragments.count(R) && "Invalid pattern fragment request!");
-    return PatternFragments.find(R)->second;
+    return PatternFragments.find(R)->second.get();
   }
   TreePattern *getPatternFragmentIfRead(Record *R) const {
-    if (!PatternFragments.count(R)) return nullptr;
-    return PatternFragments.find(R)->second;
+    if (!PatternFragments.count(R))
+      return nullptr;
+    return PatternFragments.find(R)->second.get();
   }
 
-  typedef std::map<Record*, TreePattern*, LessRecordByID>::const_iterator
-          pf_iterator;
+  typedef std::map<Record *, std::unique_ptr<TreePattern>,
+                   LessRecordByID>::const_iterator pf_iterator;
   pf_iterator pf_begin() const { return PatternFragments.begin(); }
   pf_iterator pf_end() const { return PatternFragments.end(); }
 

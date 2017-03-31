@@ -1,6 +1,14 @@
-// 1-D histograms with alphanumeric labels
-// author; Rene Brun
-void hlabels1()
+/// \file
+/// \ingroup tutorial_hist
+/// \notebook
+/// 1-D histograms with alphanumeric labels
+///
+/// \macro_image
+/// \macro_code
+///
+/// \author Rene Brun
+
+TCanvas *hlabels1()
 {
    const Int_t nx = 20;
    const char *people[nx] = {"Jean","Pierre","Marie","Odile","Sebastien",
@@ -27,4 +35,5 @@ void hlabels1()
    pt->AddText(" \">\"   to sort by decreasing values");
    pt->AddText(" \"<\"   to sort by increasing values");
    pt->Draw();
+   return c1;
 }

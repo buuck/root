@@ -4,17 +4,16 @@
 // Bindings
 #include "PyROOT.h"
 #include "PyRootType.h"
-#include "Adapters.h"
 #include "MethodProxy.h"
 #include "PropertyProxy.h"
 #include "RootWrapper.h"
-#include "TClassMethodHolder.h"
+#include "TFunctionHolder.h"
 #include "TemplateProxy.h"
+#include "PyStrings.h"
 
 // ROOT
-#include "TDataMember.h"
-#include "TInterpreter.h"
-#include "TList.h"
+#include "TClass.h"     // for method and enum finding
+#include "TList.h"      // id.
 
 // Standard
 #include <string.h>
@@ -30,28 +29,25 @@ namespace {
    PyObject* meta_alloc( PyTypeObject* metatype, Py_ssize_t nitems )
    {
    // specialized allocator, fitting in a few extra bytes for a TClassRef
-      int basicsize = metatype->tp_basicsize;
-      metatype->tp_basicsize = sizeof(PyRootClass);
       PyObject* pyclass = PyType_Type.tp_alloc( metatype, nitems );
-      metatype->tp_basicsize = basicsize;
 
       return pyclass;
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+
    void meta_dealloc( PyRootClass* pytype )
    {
-      pytype->fClass.~TClassRef();
       return PyType_Type.tp_dealloc( (PyObject*)pytype );
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Called when PyRootType acts as a metaclass; since type_new always resets
+/// tp_alloc, and since it does not call tp_init on types, the metaclass is
+/// being fixed up here, and the class is initialized here as well.
+
    PyObject* pt_new( PyTypeObject* subtype, PyObject* args, PyObject* kwds )
    {
-   // Called when PyRootType acts as a metaclass; since type_new always resets
-   // tp_alloc, and since it does not call tp_init on types, the metaclass is
-   // being fixed up here, and the class is initialized here as well.
-
    // fixup of metaclass (left permanent, and in principle only called once b/c
    // PyROOT caches python classes)
       subtype->tp_alloc   = (allocfunc)meta_alloc;
@@ -70,11 +66,13 @@ namespace {
       if ( ! mp ) {
       // there has been a user meta class override in a derived class, so do
       // the consistent thing, thus allowing user control over naming
-         new (&result->fClass) TClassRef( PyROOT_PyUnicode_AsString( PyTuple_GET_ITEM( args, 0 ) ) );
+         result->fCppType = Cppyy::GetScope(
+            PyROOT_PyUnicode_AsString( PyTuple_GET_ITEM( args, 0 ) ) );
       } else {
       // coming here from PyROOT, use meta class name instead of given name,
       // so that it is safe to inherit python classes from the bound class
-         new (&result->fClass) TClassRef( std::string( subtype->tp_name ).substr( 0, mp-subtype->tp_name ).c_str() );
+         result->fCppType = Cppyy::GetScope(
+            std::string( subtype->tp_name ).substr( 0, mp-subtype->tp_name ).c_str() );
       }
 
       return (PyObject*)result;
@@ -95,26 +93,29 @@ namespace {
       // filter for python specials and lookup qualified class or function
          std::string name = PyROOT_PyUnicode_AsString( pyname );
          if ( name.size() <= 2 || name.substr( 0, 2 ) != "__" ) {
-
-            attr = MakeRootClassFromString( name, pyclass );
+            attr = CreateScopeProxy( name, pyclass );
 
          // namespaces may have seen updates in their list of global functions, which
          // are available as "methods" even though they're not really that
             if ( ! attr && ! PyRootType_CheckExact( pyclass ) && PyType_Check( pyclass ) ) {
                PyErr_Clear();
-
-               TScopeAdapter klass = TScopeAdapter::ByName( ((PyTypeObject*)pyclass)->tp_name );
-               if ( klass.IsNamespace() ) {
+               PyObject* pycppname = PyObject_GetAttr( pyclass, PyStrings::gCppName );
+               char* cppname = PyROOT_PyUnicode_AsString(pycppname);
+               Py_DECREF(pycppname);
+               Cppyy::TCppScope_t scope = Cppyy::GetScope( cppname );
+               TClass* klass = TClass::GetClass( cppname );
+               if ( Cppyy::IsNamespace( scope ) ) {
 
                // tickle lazy lookup of functions
                   if ( ! attr ) {
-                     if ( ((TClass*)klass.Id())->GetListOfMethods()->FindObject( name.c_str() ) ) {
+                     if ( klass->GetListOfMethods()->FindObject( name.c_str() ) ) {
                      // function exists, now collect overloads
                         std::vector< PyCallable* > overloads;
-                        for ( size_t i = 0; i < klass.FunctionMemberSize(); ++i ) {
-                           TMemberAdapter m = klass.FunctionMemberAt( i );
-                           if ( m.Name() == name )
-                              overloads.push_back( new TClassMethodHolder( klass, m ) );
+                        const size_t nmeth = Cppyy::GetNumMethods( scope );
+                        for ( size_t imeth = 0; imeth < nmeth; ++imeth ) {
+                           Cppyy::TCppMethod_t method = Cppyy::GetMethod( scope, imeth );
+                           if ( Cppyy::GetMethodName( method ) == name )
+                              overloads.push_back( new TFunctionHolder( scope, method ) );
                         }
 
                      // Note: can't re-use Utility::AddClass here, as there's the risk of
@@ -126,22 +127,20 @@ namespace {
 
                // tickle lazy lookup of data members
                   if ( ! attr ) {
-                     TDataMember* dm =
-                        (TDataMember*)((TClass*)klass.Id())->GetListOfDataMembers()->FindObject( name.c_str() );
-                     if ( dm ) attr = (PyObject*)PropertyProxy_New( dm );
+                      Cppyy::TCppIndex_t dmi = Cppyy::GetDatamemberIndex( scope, name );
+                      if ( 0 <= dmi ) attr = (PyObject*)PropertyProxy_New( scope, dmi );
                   }
                }
 
             // function templates that have not been instantiated
                if ( ! attr && klass ) {
-                  TFunctionTemplate* tmpl = ((TClass*)klass.Id())->GetFunctionTemplate( name.c_str() );
+                  TFunctionTemplate* tmpl = klass->GetFunctionTemplate( name.c_str() );
                   if ( tmpl )
                      attr = (PyObject*)TemplateProxy_New( name, pyclass );
                }
 
             // enums types requested as type (rather than the constants)
-               if ( ! attr && klass &&
-                    ((TClass*)klass.Id())->GetListOfEnums()->FindObject( name.c_str() ) ) {
+               if ( ! attr && klass && klass->GetListOfEnums()->FindObject( name.c_str() ) ) {
                // special case; enum types; for now, pretend int
                // TODO: although fine for C++98, this isn't correct in C++11
                   Py_INCREF( &PyInt_Type );
@@ -158,7 +157,7 @@ namespace {
             if ( ! attr && ! PyRootType_Check( pyclass ) /* at global or module-level only */ ) {
                PyErr_Clear();
             // get class name to look up CINT tag info ...
-               attr = GetRootGlobalFromString( name /*, tag */ );
+               attr = GetCppGlobal( name /*, tag */ );
                if ( PropertyProxy_Check( attr ) ) {
                   PyObject_SetAttr( (PyObject*)Py_TYPE(pyclass), pyname, attr );
                   Py_DECREF( attr );
@@ -170,8 +169,14 @@ namespace {
          }
 
       // if failed, then the original error is likely to be more instructive
-         if ( ! attr )
+         if ( ! attr && etype )
             PyErr_Restore( etype, value, trace );
+         else if ( ! attr ) {
+            PyObject* sklass = PyObject_Str( pyclass );
+            PyErr_Format( PyExc_AttributeError, "%s has no attribute \'%s\'",
+               PyROOT_PyUnicode_AsString( sklass ), PyROOT_PyUnicode_AsString( pyname ) );
+            Py_DECREF( sklass );
+         }
 
       // attribute is cached, if found
       }
@@ -186,7 +191,7 @@ namespace {
 PyTypeObject PyRootType_Type = {
    PyVarObject_HEAD_INIT( &PyType_Type, 0 )
    (char*)"ROOT.PyRootType",  // tp_name
-   0,                         // tp_basicsize
+   sizeof(PyROOT::PyRootClass),// tp_basicsize
    0,                         // tp_itemsize
    0,                         // tp_dealloc
    0,                         // tp_print
@@ -234,6 +239,9 @@ PyTypeObject PyRootType_Type = {
 #endif
 #if PY_VERSION_HEX >= 0x02060000
    , 0                        // tp_version_tag
+#endif
+#if PY_VERSION_HEX >= 0x03040000
+   , 0                        // tp_finalize
 #endif
 };
 

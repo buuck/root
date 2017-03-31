@@ -24,9 +24,7 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TProof
 #include "TProof.h"
-#endif
 
 class TDSet;
 class TList;
@@ -52,6 +50,9 @@ private:
    TString  fSockPath;    // UNIX socket path for communication with workers
    TServerSocket *fServSock; // Server socket to accept call backs
    Bool_t   fForkStartup; // Startup N-1 workers forking the first worker
+
+   Int_t    fDynamicStartupStep;  // Dyn Startup simulation: increment at each call
+   Int_t    fDynamicStartupNMax;  // Dyn Startup simulation: max number of workers
 
    TString  fVarExp;      // Internal variable to pass drawing options
    TString  fSelection;   // Internal variable to pass drawing options
@@ -85,7 +86,6 @@ private:
 protected:
    TProofLite() : TProof() { } // For derived classes to use
 
-   Int_t CreateSymLinks(TList *files);
    Int_t Init(const char *masterurl, const char *conffile,
                const char *confdir, Int_t loglevel,
                const char *alias = 0);
@@ -95,7 +95,9 @@ protected:
    void SetQueryRunning(TProofQueryResult *pq);
    Int_t SetupWorkers(Int_t opt = 0, TList *wrks = 0);
    Int_t CopyMacroToCache(const char *macro, Int_t headerRequired = 0,
-                          TSelector **selector = 0, Int_t opt = 0);
+                          TSelector **selector = 0, Int_t opt = 0, TList *wrks = 0);
+
+   Int_t PollForNewWorkers();
 
 public:
    TProofLite(const char *masterurl, const char *conffile = kPROOF_ConfFile,

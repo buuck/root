@@ -73,6 +73,10 @@ MINEXAMO      = minexam.$(ObjSuf)
 MINEXAMS      = minexam.$(SrcSuf)
 MINEXAM       = minexam$(ExeSuf)
 
+TFORMULAO      = TFormulaTests.$(ObjSuf)
+TFORMULAS      = TFormulaTests.$(SrcSuf)
+TFORMULA       = TFormulaTests$(ExeSuf)
+
 TSTRINGO      = tstring.$(ObjSuf)
 TSTRINGS      = tstring.$(SrcSuf)
 TSTRING       = tstring$(ExeSuf)
@@ -106,7 +110,7 @@ STRESSGUIS    = stressGUI.$(SrcSuf)
 STRESSGUI     = stressGUI$(ExeSuf)
 ifeq ($(PLATFORM),win32)
 STRESSGUILIBS = '$(ROOTSYS)/lib/libASImage.lib' '$(ROOTSYS)/lib/libASImageGui.lib' \
-                '$(ROOTSYS)/lib/libRecorder.lib' '$(ROOTSYS)/lib/libGuiHtml.lib' 
+                '$(ROOTSYS)/lib/libRecorder.lib' '$(ROOTSYS)/lib/libGuiHtml.lib'
 else
 STRESSGUILIBS = -lASImage -lASImageGui -lRecorder -lGuiHtml
 endif
@@ -116,12 +120,12 @@ STRESSVECO   = stressVector.$(ObjSuf)
 STRESSVECS   = stressVector.$(SrcSuf)
 STRESSVEC    = stressVector$(ExeSuf)
 
-STRESSMATHO   = stressMathCore.$(ObjSuf) 
-STRESSMATHS   = stressMathCore.$(SrcSuf) 
+STRESSMATHO   = stressMathCore.$(ObjSuf)
+STRESSMATHS   = stressMathCore.$(SrcSuf)
 ifneq ($(USE_REFLEX),)
 CXXFLAGS += -DUSE_REFLEX
 ifeq ($(PLATFORM),win32)
-STRESSMATHLIBS = '$(ROOTSYS)/lib/libGenVector.lib' '$(ROOTSYS)/lib/libReflex.lib' '$(ROOTSYS)/lib/libCintex.lib' 
+STRESSMATHLIBS = '$(ROOTSYS)/lib/libGenVector.lib' '$(ROOTSYS)/lib/libReflex.lib' '$(ROOTSYS)/lib/libCintex.lib'
 else
 STRESSMATHLIBS = -lGenVector -lReflex -lCintex
 endif
@@ -130,7 +134,7 @@ TRACKMATHSRC = TrackMathCoreRflx.$(SrcSuf)
 TRACKMATHOBJ = TrackMathCoreRflx.$(ObjSuf)
 TRACKMATHLIB = libTrackMathCoreRflx.$(DllSuf)
 
-else 
+else
 
 ifeq ($(PLATFORM),win32)
 STRESSMATHLIBS = '$(ROOTSYS)/lib/libGenVector.lib'
@@ -141,7 +145,7 @@ endif
 TRACKMATHSRC = TrackMathCoreDict.$(SrcSuf)
 TRACKMATHOBJ = TrackMathCoreDict.$(ObjSuf)
 TRACKMATHLIB = libTrackMathCoreDict.$(DllSuf)
- 
+
 endif
 
 STRESSMATH    = stressMathCore$(ExeSuf)
@@ -149,10 +153,10 @@ STRESSMATH    = stressMathCore$(ExeSuf)
 endif
 
 ifeq ($(shell $(RC) --has-mathmore),yes)
-STRESSMATHMOREO   = stressMathMore.$(ObjSuf) 
-STRESSMATHMORES   = stressMathMore.$(SrcSuf)  
+STRESSMATHMOREO   = stressMathMore.$(ObjSuf)
+STRESSMATHMORES   = stressMathMore.$(SrcSuf)
 ifeq ($(PLATFORM),win32)
-STRESSMATHMORELIBS = '$(ROOTSYS)/lib/libMathMore.lib'  
+STRESSMATHMORELIBS = '$(ROOTSYS)/lib/libMathMore.lib'
 else
 STRESSMATHMORELIBS = -lMathMore
 endif
@@ -295,7 +299,7 @@ endif
 
 
 OBJS          = $(EVENTO) $(MAINEVENTO) $(EVENTMTO) $(HWORLDO) $(HSIMPLEO) \
-                $(MINEXAMO) \
+                $(MINEXAMO) $(TFORMULAO) \
                 $(TSTRINGO) $(TCOLLEXO) $(VVECTORO) $(VMATRIXO) $(VLAZYO) \
                 $(HELLOO) $(ACLOCKO) $(STRESSO) $(TBENCHO) $(BENCHO) \
                 $(STRESSSHAPESO) $(TCOLLBMO) $(STRESSGEOMETRYO) $(STRESSLO) \
@@ -308,7 +312,7 @@ OBJS          = $(EVENTO) $(MAINEVENTO) $(EVENTMTO) $(HWORLDO) $(HSIMPLEO) \
                 $(STRESSTMVAO) $(STRESSINTERPO) $(STRESSITERO) \
                 $(STRESSHISTO) $(STRESSGUIO) $(SQLITETESTO) $(IOPLUGINSO)
 
-PROGRAMS      = $(EVENT) $(EVENTMTSO) $(HWORLD) $(HSIMPLE) $(MINEXAM) \
+PROGRAMS      = $(EVENT) $(EVENTMTSO) $(HWORLD) $(HSIMPLE) $(MINEXAM) $(TFORMULA) \
                 $(TSTRING) $(TCOLLEX) $(TCOLLBM) $(VVECTOR) $(VMATRIX) \
                 $(VLAZY) $(HELLOSO) $(ACLOCKSO) $(STRESS) $(TBENCHSO) $(BENCH) \
                 $(STRESSSHAPES) $(STRESSGEOMETRY) $(STRESSL) $(STRESSG) \
@@ -339,13 +343,7 @@ ifeq ($(ARCH),aix5)
 		$(MAKESHARED) $(OutPutOpt) $@ $(LIBS) -p 0 $^
 else
 ifeq ($(PLATFORM),macosx)
-# We need to make both the .dylib and the .so
 		$(LD) $(SOFLAGS)$@ $(LDFLAGS) $^ $(OutPutOpt) $@ $(EXPLLINKLIBS)
-ifneq ($(subst $(MACOSX_MINOR),,1234),1234)
-ifeq ($(MACOSX_MINOR),4)
-		ln -sf $@ $(subst .$(DllSuf),.so,$@)
-endif
-endif
 else
 ifeq ($(PLATFORM),win32)
 		bindexplib $* $^ > $*.def
@@ -366,13 +364,7 @@ ifeq ($(ARCH),aix5)
 		$(MAKESHARED) $(OutPutOpt) $@ $(LIBS) -p 0 $^
 else
 ifeq ($(PLATFORM),macosx)
-# We need to make both the .dylib and the .so
 		$(LD) $(SOFLAGS)$@ $(LDFLAGS) $^ $(OutPutOpt) $@ $(EXPLLINKLIBS)
-ifneq ($(subst $(MACOSX_MINOR),,1234),1234)
-ifeq ($(MACOSX_MINOR),4)
-		ln -sf $@ $(subst .$(DllSuf),.so,$@)
-endif
-endif
 else
 ifeq ($(PLATFORM),win32)
 		bindexplib $* $^ > $*.def
@@ -409,6 +401,11 @@ $(HSIMPLE):     $(HSIMPLEO)
 		@echo "$@ done"
 
 $(MINEXAM):     $(MINEXAMO)
+		$(LD) $(LDFLAGS) $^ $(LIBS) $(OutPutOpt)$@
+		$(MT_EXE)
+		@echo "$@ done"
+
+$(TFORMULA):     $(TFORMULAO)
 		$(LD) $(LDFLAGS) $^ $(LIBS) $(OutPutOpt)$@
 		$(MT_EXE)
 		@echo "$@ done"
@@ -481,13 +478,7 @@ ifeq ($(ARCH),aix5)
 		$(MAKESHARED) $(OutPutOpt) $@ $(LIBS) -p 0 $^
 else
 ifeq ($(PLATFORM),macosx)
-# We need to make both the .dylib and the .so
 		$(LD) $(SOFLAGS)$@ $(LDFLAGS) $^ $(OutPutOpt) $@ $(LIBS) $(STRESSMATHLIBS)
-ifneq ($(subst $(MACOSX_MINOR),,1234),1234)
-ifeq ($(MACOSX_MINOR),4)
-		ln -sf $@ $(subst .$(DllSuf),.so,$@)
-endif
-endif
 else
 		$(LD) $(SOFLAGS) $(LDFLAGS) $^ $(LIBS) $(STRESSMATHLIBS) $(OutPutOpt)$@
 		$(MT_DLL)
@@ -565,7 +556,7 @@ $(STRESS):      $(STRESSO) $(EVENT)
 		$(MT_EXE)
 		@echo "$@ done"
 
-$(IOPLUGINS):   $(IOPLUGINSO) $(EVENTO)
+$(IOPLUGINS):   $(IOPLUGINSO) $(EVENT)
 		$(LD) $(LDFLAGS) $(IOPLUGINSO) $(EVENTO) $(LIBS) $(OutPutOpt)$@
 		$(MT_EXE)
 		@echo "$@ done"
@@ -658,7 +649,7 @@ ifeq ($(PLATFORM),win32)
 		$(LD) $(LDFLAGS) $^ $(LIBS) '$(ROOTSYS)/lib/libProof.lib' '$(ROOTSYS)/lib/libThread.lib' $(OutPutOpt)$@
 		$(MT_EXE)
 else
-		$(LD) $(LDFLAGS) $(STRESSPROOFO) $(LIBS) -lProof -lProofPlayer -lThread $(OutPutOpt)$@
+		$(LD) $(LDFLAGS) $(STRESSPROOFO) $(LIBS) -lProof -lProofPlayer -lThread -lSessionViewer $(OutPutOpt)$@
 endif
 		@echo "$@ done"
 
@@ -673,13 +664,7 @@ ifeq ($(ARCH),aix5)
 		$(MAKESHARED) $(OutPutOpt) $@ $(LIBS) -p 0 $^
 else
 ifeq ($(PLATFORM),macosx)
-# We need to make both the .dylib and the .so
 		$(LD) $(SOFLAGS)$@ $(LDFLAGS) $^ $(OutPutOpt) $@ $(EXPLLINKLIBS)
-ifneq ($(subst $(MACOSX_MINOR),,1234),1234)
-ifeq ($(MACOSX_MINOR),4)
-		ln -sf $@ $(subst .$(DllSuf),.so,$@)
-endif
-endif
 else
 		$(LD) $(SOFLAGS) $(LDFLAGS) $^ $(EXPLLINKLIBS) $(OutPutOpt)$@
 		$(MT_DLL)
@@ -692,13 +677,7 @@ ifeq ($(ARCH),aix5)
 		$(MAKESHARED) $(OutPutOpt) $@ $(LIBS) -p 0 $^
 else
 ifeq ($(PLATFORM),macosx)
-# We need to make both the .dylib and the .so
 		$(LD) $(SOFLAGS)$@ $(LDFLAGS) $^ $(OutPutOpt) $@ $(EXPLLINKLIBS)
-ifneq ($(subst $(MACOSX_MINOR),,1234),1234)
-ifeq ($(MACOSX_MINOR),4)
-		ln -sf $@ $(subst .$(DllSuf),.so,$@)
-endif
-endif
 else
 		$(LD) $(SOFLAGS) $(LDFLAGS) $^ $(EXPLLINKLIBS) $(OutPutOpt)$@
 		$(MT_DLL)
@@ -711,13 +690,7 @@ ifeq ($(ARCH),aix5)
 		$(MAKESHARED) $(OutPutOpt) $@ $(GLIBS) -p 0 $^
 else
 ifeq ($(PLATFORM),macosx)
-# We need to make both the .dylib and the .so
 		$(LD) $(SOFLAGS)$@ $(LDFLAGS) $^ $(OutPutOpt) $@ $(EXPLLINKLIBS)
-ifneq ($(subst $(MACOSX_MINOR),,1234),1234)
-ifeq ($(MACOSX_MINOR),4)
-		ln -sf $@ $(subst .$(DllSuf),.so,$@)
-endif
-endif
 else
 		$(LD) $(SOFLAGS) $(LDFLAGS) $^ $(EXPLLINKLIBS) $(OutPutOpt)$@
 		$(MT_DLL)
@@ -729,25 +702,19 @@ ifeq ($(ARCH),aix5)
 		$(MAKESHARED) $(OutPutOpt) $@ $(LIBS) -p 0 $^
 else
 ifeq ($(PLATFORM),macosx)
-# We need to make both the .dylib and the .so
 		$(LD) $(SOFLAGS)$@ $(LDFLAGS) $^ $(OutPutOpt) $@ $(EXPLLINKLIBS)
-ifneq ($(subst $(MACOSX_MINOR),,1234),1234)
-ifeq ($(MACOSX_MINOR),4)
-		ln -sf $@ $(subst .$(DllSuf),.so,$@)
-endif
-endif
 else
 		$(LD) $(SOFLAGS) $(LDFLAGS) $^ $(EXPLLINKLIBS) $(OutPutOpt)$@
 		$(MT_DLL)
 endif
 endif
 
-$(STRESSINTERP): $(STRESSINTERPO) 
+$(STRESSINTERP): $(STRESSINTERPO)
 		$(LD) $(LDFLAGS) $^ $(LIBS) $(OutPutOpt)$@
 		$(MT_EXE)
 		@echo "$@ done"
 
-$(STRESSITER):	$(STRESSITERO) 
+$(STRESSITER):	$(STRESSITERO)
 		$(LD) $(LDFLAGS) $^ $(LIBS) $(OutPutOpt)$@
 		$(MT_EXE)
 		@echo "$@ done"
@@ -763,16 +730,18 @@ $(SQLITETEST):  $(SQLITETESTO)
 		@echo "$@ done"
 
 clean:
-		@rm -f $(OBJS) $(TRACKMATHSRC) core *Dict.*
+		@rm -f $(OBJS) $(TRACKMATHSRC) core *Dict.* cernstaff.root sg*
 
 distclean:      clean
 		-@(mv -f stressRooStats_ref.root stressRooStats_ref.root- >/dev/null 2>&1;true)
+		-@(mv -f stressRooFit_ref.root stressRooFit_ref.root- >/dev/null 2>&1;true)
 		-@(mv -f stressHistFactory_ref.root stressHistFactory_ref.root- >/dev/null 2>&1;true)
 		@rm -f $(PROGRAMS) $(EVENTSO) $(EVENTLIB) *Dict.* *.def *.exp \
 		   *.root *.ps *.so *.lib *.dll *.d *.log .def so_locations \
 		   files/* *.pcm testdb.sqlite
 		@rm -rf cxx_repository
 		-@(mv -f stressRooStats_ref.root- stressRooStats_ref.root >/dev/null 2>&1;true)
+		-@(mv -f stressRooFit_ref.root- stressRooFit_ref.root >/dev/null 2>&1;true)
 		-@(mv -f stressHistFactory_ref.root- stressHistFactory_ref.root >/dev/null 2>&1;true)
 		-@cd RootShower && $(MAKE) distclean
 		-@cd rhtml && $(MAKE) distclean
@@ -784,7 +753,7 @@ distclean:      clean
 
 ###
 stressIterators.$(ObjSuf): stressIterators.h
- 
+
 Event.$(ObjSuf): Event.h
 EventMT.$(ObjSuf): EventMT.h
 MainEvent.$(ObjSuf): Event.h
@@ -825,7 +794,7 @@ guiviewerDict.$(SrcSuf): guiviewer.h guiviewerLinkDef.h
 stressMathCore.$(ObjSuf): 	TrackMathCore.h
 TrackMathCoreDict.$(SrcSuf): 	TrackMathCore.h TrackMathCoreLinkDef.h
 	@echo "Generating dictionary $@ using rootcling ..."
-	$(ROOTCLING) -f $@ -c $^	
+	$(ROOTCLING) -f $@ -c $^
 
 stressProof.$(ObjSuf):	stressProof.$(SrcSuf)
 	$(CXX)  $(CXXFLAGS) -I$(TUTDIR) -c $<

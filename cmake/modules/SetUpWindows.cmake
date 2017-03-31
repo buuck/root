@@ -13,25 +13,28 @@ if(CMAKE_COMPILER_IS_GNUCXX)
 
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pipe  -Wall -W -Woverloaded-virtual -fPIC")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pipe -Wall -W -fPIC")
-  set(CMAKE_Fortran_FLAGS "${CMAKE_FORTRAN_FLAGS} -std=legacy")
+  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -std=legacy")
 
   set(CINT_CXX_DEFINITIONS "-DG__REGEXP -DG__UNIX -DG__SHAREDLIB -DG__OSFDLL -DG__ROOT -DG__REDIRECTIO -DG__STD_EXCEPTION ${SPECIAL_CINT_FLAGS}")
   set(CINT_C_DEFINITIONS "-DG__REGEXP -DG__UNIX -DG__SHAREDLIB -DG__OSFDLL -DG__ROOT -DG__REDIRECTIO -DG__STD_EXCEPTION ${SPECIAL_CINT_FLAGS}")
 
 
-  set(CMAKE_SHARED_LINKER_FLAGS "-Wl,--no-undefined")
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
 
-  # Select compiler flags
-  set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g")
-  set(CMAKE_CXX_FLAGS_RELEASE        "-O2")
-  set(CMAKE_CXX_FLAGS_DEBUG          "-g  -fno-reorder-blocks -fno-schedule-insns -fno-inline")
-  set(CMAKE_CXX_FLAGS_DEBUGFULL      "-g3 -fno-inline")
-  set(CMAKE_CXX_FLAGS_PROFILE        "-g3 -fno-inline -ftest-coverage -fprofile-arcs")
-  set(CMAKE_C_FLAGS_RELWITHDEBINFO   "-O2 -g")
-  set(CMAKE_C_FLAGS_RELEASE          "-O2")
-  set(CMAKE_C_FLAGS_DEBUG            "-g  -fno-reorder-blocks -fno-schedule-insns -fno-inline")
+  # Select flags.
+  set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -DNDEBUG")
+  set(CMAKE_CXX_FLAGS_RELEASE        "-O2 -DNDEBUG")
+  set(CMAKE_CXX_FLAGS_OPTIMIZED      "-Ofast -DNDEBUG")
+  set(CMAKE_CXX_FLAGS_DEBUG          "-g")
+  set(CMAKE_CXX_FLAGS_DEBUGFULL      "-g3")
+  set(CMAKE_CXX_FLAGS_PROFILE        "-g3 -ftest-coverage -fprofile-arcs")
+  set(CMAKE_C_FLAGS_RELWITHDEBINFO   "-O2 -g -DNDEBUG")
+  set(CMAKE_C_FLAGS_RELEASE          "-O2 -DNDEBUG")
+  set(CMAKE_C_FLAGS_OPTIMIZED        "-Ofast -DNDEBUG")
+  set(CMAKE_C_FLAGS_DEBUG            "-g")
   set(CMAKE_C_FLAGS_DEBUGFULL        "-g3 -fno-inline")
   set(CMAKE_C_FLAGS_PROFILE          "-g3 -fno-inline -ftest-coverage -fprofile-arcs")
+
 
   #---Set Linker flags----------------------------------------------------------------------
   set(CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS "${CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS}")
@@ -60,7 +63,7 @@ elseif(MSVC)
   endif()
 
   if(CMAKE_PROJECT_NAME STREQUAL ROOT)
-    set(CMAKE_CXX_FLAGS "-nologo -I${CMAKE_SOURCE_DIR}/build/win -FIw32pragma.h -FIsehmap.h ${BLDCXXFLAGS} -EHsc- -W3 -wd4244 -D_WIN32")
+    set(CMAKE_CXX_FLAGS "-nologo -I${CMAKE_SOURCE_DIR}/build/win -FIw32pragma.h -FIsehmap.h ${BLDCXXFLAGS} -EHsc- -W3 -wd4244 -D_WIN32 -D_XKEYCHECK_H")
     set(CMAKE_C_FLAGS   "-nologo -I${CMAKE_SOURCE_DIR}/build/win -FIw32pragma.h -FIsehmap.h ${BLDCFLAGS} -EHsc- -W3 -D_WIN32")
     install(FILES ${CMAKE_SOURCE_DIR}/build/win/w32pragma.h  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT headers)
     install(FILES ${CMAKE_SOURCE_DIR}/build/win/sehmap.h  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT headers)
@@ -72,9 +75,11 @@ elseif(MSVC)
   #---Select compiler flags----------------------------------------------------------------
   set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -Z7")
   set(CMAKE_CXX_FLAGS_RELEASE        "-O2")
+  set(CMAKE_CXX_FLAGS_OPTIMIZED      "-O2")
   set(CMAKE_CXX_FLAGS_DEBUG          "-Od -Z7")
   set(CMAKE_C_FLAGS_RELWITHDEBINFO   "-O2 -Z7")
   set(CMAKE_C_FLAGS_RELEASE          "-O2")
+  set(CMAKE_C_FLAGS_OPTIMIZED        "-O2")
   set(CMAKE_C_FLAGS_DEBUG            "-Od -Z7")
 
   #---Set Linker flags----------------------------------------------------------------------

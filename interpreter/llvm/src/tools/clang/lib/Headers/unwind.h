@@ -26,8 +26,8 @@
 #ifndef __CLANG_UNWIND_H
 #define __CLANG_UNWIND_H
 
-#if __has_include_next(<unwind.h>)
-/* Darwin (from 11.x on) and libunwind provide an unwind.h. If that's available,
+#if defined(__APPLE__) && __has_include_next(<unwind.h>)
+/* Darwin (from 11.x on) provide an unwind.h. If that's available,
  * use it. libunwind wraps some of its definitions in #ifdef _GNU_SOURCE,
  * so define that around the include.*/
 # ifndef _GNU_SOURCE
@@ -79,6 +79,10 @@ struct _Unwind_Context;
 struct _Unwind_Exception;
 typedef enum {
   _URC_NO_REASON = 0,
+#if defined(__arm__) && !defined(__USING_SJLJ_EXCEPTIONS__) && \
+    !defined(__ARM_DWARF_EH__)
+  _URC_OK = 0, /* used by ARM EHABI */
+#endif
   _URC_FOREIGN_EXCEPTION_CAUGHT = 1,
 
   _URC_FATAL_PHASE2_ERROR = 2,
@@ -88,7 +92,11 @@ typedef enum {
   _URC_END_OF_STACK = 5,
   _URC_HANDLER_FOUND = 6,
   _URC_INSTALL_CONTEXT = 7,
-  _URC_CONTINUE_UNWIND = 8
+  _URC_CONTINUE_UNWIND = 8,
+#if defined(__arm__) && !defined(__USING_SJLJ_EXCEPTIONS__) && \
+    !defined(__ARM_DWARF_EH__)
+  _URC_FAILURE = 9 /* used by ARM EHABI */
+#endif
 } _Unwind_Reason_Code;
 
 typedef enum {
@@ -150,6 +158,15 @@ typedef enum {
   _UVRSR_FAILED = 2
 } _Unwind_VRS_Result;
 
+#if !defined(__USING_SJLJ_EXCEPTIONS__) && !defined(__ARM_DWARF_EH__)
+typedef uint32_t _Unwind_State;
+#define _US_VIRTUAL_UNWIND_FRAME  ((_Unwind_State)0)
+#define _US_UNWIND_FRAME_STARTING ((_Unwind_State)1)
+#define _US_UNWIND_FRAME_RESUME   ((_Unwind_State)2)
+#define _US_ACTION_MASK           ((_Unwind_State)3)
+#define _US_FORCE_UNWIND          ((_Unwind_State)8)
+#endif
+
 _Unwind_VRS_Result _Unwind_VRS_Get(struct _Unwind_Context *__context,
   _Unwind_VRS_RegClass __regclass,
   uint32_t __regno,
@@ -199,6 +216,8 @@ _Unwind_Word _Unwind_GetIPInfo(struct _Unwind_Context *, int *);
 
 _Unwind_Word _Unwind_GetCFA(struct _Unwind_Context *);
 
+_Unwind_Word _Unwind_GetBSP(struct _Unwind_Context *);
+
 void *_Unwind_GetLanguageSpecificData(struct _Unwind_Context *);
 
 _Unwind_Ptr _Unwind_GetRegionStart(struct _Unwind_Context *);
@@ -233,9 +252,9 @@ void *_Unwind_FindEnclosingFunction(void *);
 #ifdef __APPLE__
 
 _Unwind_Ptr _Unwind_GetDataRelBase(struct _Unwind_Context *)
-    __attribute__((unavailable));
+    __attribute__((__unavailable__));
 _Unwind_Ptr _Unwind_GetTextRelBase(struct _Unwind_Context *)
-    __attribute__((unavailable));
+    __attribute__((__unavailable__));
 
 /* Darwin-specific functions */
 void __register_frame(const void *);
@@ -249,15 +268,15 @@ struct dwarf_eh_bases {
 void *_Unwind_Find_FDE(const void *, struct dwarf_eh_bases *);
 
 void __register_frame_info_bases(const void *, void *, void *, void *)
-  __attribute__((unavailable));
-void __register_frame_info(const void *, void *) __attribute__((unavailable));
+  __attribute__((__unavailable__));
+void __register_frame_info(const void *, void *) __attribute__((__unavailable__));
 void __register_frame_info_table_bases(const void *, void*, void *, void *)
-  __attribute__((unavailable));
+  __attribute__((__unavailable__));
 void __register_frame_info_table(const void *, void *)
-  __attribute__((unavailable));
-void __register_frame_table(const void *) __attribute__((unavailable));
-void __deregister_frame_info(const void *) __attribute__((unavailable));
-void __deregister_frame_info_bases(const void *)__attribute__((unavailable));
+  __attribute__((__unavailable__));
+void __register_frame_table(const void *) __attribute__((__unavailable__));
+void __deregister_frame_info(const void *) __attribute__((__unavailable__));
+void __deregister_frame_info_bases(const void *)__attribute__((__unavailable__));
 
 #else
 

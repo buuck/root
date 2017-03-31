@@ -19,13 +19,12 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Support/AlignOf.h"
-#include "llvm/Support/Allocator.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetInstrInfo.h"
-#include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetRegisterInfo.h"
+#include "llvm/Target/TargetSubtargetInfo.h"
 #include "llvm/Transforms/Utils/SSAUpdaterImpl.h"
 using namespace llvm;
 
@@ -39,7 +38,7 @@ static AvailableValsTy &getAvailableVals(void *AV) {
 MachineSSAUpdater::MachineSSAUpdater(MachineFunction &MF,
                                      SmallVectorImpl<MachineInstr*> *NewPHI)
   : AV(nullptr), InsertedPHIs(NewPHI) {
-  TII = MF.getTarget().getInstrInfo();
+  TII = MF.getSubtarget().getInstrInfo();
   MRI = &MF.getRegInfo();
 }
 

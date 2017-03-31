@@ -43,6 +43,7 @@ namespace cling {
   //                 OCommand := 'O'[' ']Constant
   //                 RawInputCommand := 'rawInput' [Constant]
   //                 PrintDebugCommand := 'printDebug' [Constant]
+  //                 DebugCommand := 'debug' [Constant]
   //                 StoreStateCommand := 'storeState' "Ident"
   //                 CompareStateCommand := 'compareState' "Ident"
   //                 StatsCommand := 'stats' ['ast']
@@ -62,7 +63,7 @@ namespace cling {
   //
   class MetaParser {
   private:
-    std::unique_ptr<MetaLexer> m_Lexer;
+    MetaLexer m_Lexer;
     std::unique_ptr<MetaSema> m_Actions;
     llvm::SmallVector<Token, 2> m_TokenCache;
     llvm::SmallVector<Token, 4> m_MetaSymbolCache;
@@ -93,6 +94,7 @@ namespace cling {
     bool isICommand();
     bool isOCommand();
     bool israwInputCommand();
+    bool isdebugCommand();
     bool isprintDebugCommand();
     bool isstoreStateCommand();
     bool iscompareStateCommand();

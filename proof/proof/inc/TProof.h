@@ -24,41 +24,22 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TProofMgr
 #include "TProofMgr.h"
-#endif
-#ifndef ROOT_TProofDebug
 #include "TProofDebug.h"
-#endif
-#ifndef ROOT_TString
 #include "TString.h"
-#endif
-#ifndef ROOT_TMacro
 #include "TMacro.h"
-#endif
-#ifndef ROOT_MessageTypes
 #include "MessageTypes.h"
-#endif
-#ifndef ROOT_TMD5
 #include "TMD5.h"
-#endif
-#ifndef ROOT_TRegexp
 #include "TRegexp.h"
-#endif
-#ifndef ROOT_TSysEvtHandler
 #include "TSysEvtHandler.h"
-#endif
-#ifndef ROOT_TThread
-#include "TThread.h"
-#endif
-#ifndef ROOT_TUrl
 #include "TUrl.h"
-#endif
-#ifndef ROOT_TProofOutputList
 #include "TProofOutputList.h"
-#endif
+#include "TStopwatch.h"
+#include "TVirtualMutex.h"
+#include "TPackMgr.h"
 
 #include <map>
+#include <mutex>
 
 #ifdef R__GLOBALSTL
 namespace std { using ::map; }
@@ -90,10 +71,8 @@ class TProofServ;
 class TQueryResult;
 class TSignalHandler;
 class TSlave;
-class TSemaphore;
 class TSocket;
 class TTree;
-class TVirtualMutex;
 class TFileCollection;
 class TMap;
 class TDataSetManager;
@@ -139,9 +118,10 @@ class TSelector;
 // 33 -> 34: Development cycle 5.33/02 (fix load issue, ...)
 // 34 -> 35: Development cycle 5.99/01 (PLite on workers, staging requests in separate dsmgr...)
 // 35 -> 36: SetParallel in dynamic mode (changes default in GoParallel), cancel staging requests
+// 36 -> 37: Support for remote (web) PAR packages
 
 // PROOF magic constants
-const Int_t       kPROOF_Protocol        = 36;            // protocol version number
+const Int_t       kPROOF_Protocol        = 37;            // protocol version number
 const Int_t       kPROOF_Port            = 1093;          // IANA registered PROOF port
 const char* const kPROOF_ConfFile        = "proof.conf";  // default config file
 const char* const kPROOF_ConfDir         = "/usr/local/root";  // default config dir
@@ -178,8 +158,6 @@ const char* const kUNTAR2 = "...";
 const char* const kUNTAR3 = "...";
 const char* const kGUNZIP = "gunzip";
 #endif
-
-R__EXTERN TVirtualMutex *gProofMutex;
 
 typedef void (*PrintProgress_t)(Long64_t tot, Long64_t proc, Float_t proctime, Long64_t bytes);
 
@@ -482,11 +460,6 @@ private:
       kBuildAll            = 0,
       kCollectBuildResults = 1
    };
-   enum EParCheckVersionOpt {
-      kDontCheck   = 0,
-      kCheckROOT    = 1,
-      kCheckSVN     = 2
-   };
    enum EProofShowQuotaOpt {
       kPerGroup = 0x1,
       kPerUser = 0x2
@@ -560,10 +533,8 @@ private:
 
    Bool_t          fEndMaster;       //true for a master in direct contact only with workers
 
-   TString         fPackageDir;      //package directory (used on client)
-   THashList      *fGlobalPackageDirList;//list of directories containing global packages libs
-   TProofLockPath *fPackageLock;     //package lock
-   TList          *fEnabledPackagesOnClient; //list of packages enabled on client
+   TPackMgr       *fPackMgr;          // Default package manager
+   TList          *fEnabledPackagesOnCluster;  //list of enabled packages
 
    TList          *fInputData;       //Input data objects sent over via file
    TString         fInputDataFile;   //File with input data objects
@@ -572,7 +543,7 @@ private:
 
    PrintProgress_t fPrintProgress;   //Function function to display progress info in batch mode
 
-   TVirtualMutex  *fCloseMutex;      // Avoid crashes in MarkBad or alike while closing
+   std::recursive_mutex fCloseMutex;      // Avoid crashes in MarkBad or alike while closing
 
    TList          *fLoadedMacros;    // List of loaded macros (just file names)
    static TList   *fgProofEnvList;   // List of TNameds defining environment
@@ -623,7 +594,8 @@ protected:
 
    TSelector       *fSelector;      // Selector to be processed, if any
 
-   static TSemaphore *fgSemaphore;   //semaphore to control no of parallel startup threads
+   TStopwatch      fQuerySTW;       // Stopwatch to measure query times
+   Float_t         fPrepTime;       // Preparation time
 
 private:
    TProof(const TProof &);           // not implemented
@@ -634,6 +606,7 @@ private:
    Int_t    Exec(const char *cmd, ESlaves list, Bool_t plusMaster);
    Int_t    SendCommand(const char *cmd, ESlaves list = kActive);
    Int_t    SendCurrentState(ESlaves list = kActive);
+   Int_t    SendCurrentState(TList *list);
    Bool_t   CheckFile(const char *file, TSlave *sl, Long_t modtime, Int_t cpopt = (kCp | kCpBin));
    Int_t    SendObject(const TObject *obj, ESlaves list = kActive);
    Int_t    SendGroupView();
@@ -648,16 +621,12 @@ private:
    Int_t    SetParallelSilent(Int_t nodes, Bool_t random = kFALSE);
    void     RecvLogFile(TSocket *s, Int_t size);
    void     NotifyLogMsg(const char *msg, const char *sfx = "\n");
-   Int_t    BuildPackage(const char *package, EBuildPackageOpt opt = kBuildAll, Int_t chkveropt = kCheckROOT);
-   Int_t    BuildPackageOnClient(const char *package, Int_t opt = 0, TString *path = 0, Int_t chkveropt = kCheckROOT);
+
+   Int_t    BuildPackage(const char *package, EBuildPackageOpt opt = kBuildAll, Int_t chkveropt = TPackMgr::kCheckROOT, TList *workers = 0);
    Int_t    LoadPackage(const char *package, Bool_t notOnClient = kFALSE, TList *loadopts = 0, TList *workers = 0);
-   Int_t    LoadPackageOnClient(const char *package, TList *loadopts = 0);
    Int_t    UnloadPackage(const char *package);
-   Int_t    UnloadPackageOnClient(const char *package);
    Int_t    UnloadPackages();
-   Int_t    UploadPackageOnClient(const char *package, EUploadPackageOpt opt, TMD5 *md5);
    Int_t    DisablePackage(const char *package);
-   Int_t    DisablePackageOnClient(const char *package);
    Int_t    DisablePackages();
 
    void     Activate(TList *slaves = 0);
@@ -681,7 +650,6 @@ private:
    Int_t    HandleInputMessage(TSlave *wrk, TMessage *m, Bool_t deactonfail = kFALSE);
    void     HandleSubmerger(TMessage *mess, TSlave *sl);
    void     SetMonitor(TMonitor *mon = 0, Bool_t on = kTRUE);
-   Int_t    PollForNewWorkers();
 
    void     ReleaseMonitor(TMonitor *mon);
 
@@ -699,7 +667,7 @@ private:
 
    Bool_t   IsEndMaster() const { return fEndMaster; }
    Int_t    ModifyWorkerLists(const char *ord, Bool_t add, Bool_t save);
-   void     RestoreActiveList();
+   Int_t    RestoreActiveList();
    void     SaveActiveList();
 
    Bool_t   IsSync() const { return fSync; }
@@ -746,6 +714,7 @@ protected:
    virtual Bool_t  StartSlaves(Bool_t attach = kFALSE);
    Int_t AddWorkers(TList *wrks);
    Int_t RemoveWorkers(TList *wrks);
+   void  SetupWorkersEnv(TList *wrks, Bool_t increasingpool = kFALSE);
 
    void                         SetPlayer(TVirtualProofPlayer *player);
    TVirtualProofPlayer         *GetPlayer() const { return fPlayer; }
@@ -761,10 +730,13 @@ protected:
    TSlave *CreateSubmaster(const char *url, const char *ord,
                            const char *image, const char *msd, Int_t nwk = 1);
 
+   virtual Int_t PollForNewWorkers();
    virtual void SaveWorkerInfo();
 
    Int_t    Collect(ESlaves list = kActive, Long_t timeout = -1, Int_t endtype = -1, Bool_t deactonfail = kFALSE);
    Int_t    Collect(TList *slaves, Long_t timeout = -1, Int_t endtype = -1, Bool_t deactonfail = kFALSE);
+
+   TList   *GetEnabledPackages() const { return fEnabledPackagesOnCluster; }
 
    void         SetDSet(TDSet *dset) { fDSet = dset; }
    virtual void ValidateDSet(TDSet *dset);
@@ -790,6 +762,8 @@ protected:
 
    static Int_t AssertDataSet(TDSet *dset, TList *input,
                               TDataSetManager *mgr, TString &emsg);
+   static void AssertMacroPath(const char *macro);
+
    // Input data handling
    static Int_t GetInputData(TList *input, const char *cachedir, TString &emsg);
    static Int_t SaveInputData(TQueryResult *qr, const char *cachedir, TString &emsg);

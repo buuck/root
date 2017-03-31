@@ -51,6 +51,7 @@ private:
    Int_t                   fReadvIorMax; // Max size of a single readv chunk
    Int_t                   fReadvIovMax; // Max number of readv chunks
    Int_t                   fQueryReadVParams;
+   TString                 fNewUrl;
 
 public:
    TNetXNGFile() : TFile(),
@@ -73,12 +74,14 @@ public:
    virtual Bool_t   ReadBuffer(char *buffer, Long64_t position, Int_t length);
    virtual Bool_t   ReadBuffers(char *buffer, Long64_t *position, Int_t *length,
                                 Int_t nbuffs);
+   virtual TString  GetNewUrl() { return fNewUrl; }
 
 private:
    virtual Bool_t IsUseable() const;
    virtual Bool_t GetVectorReadLimits();
    virtual void   SetEnv();
-   XrdCl::OpenFlags::Flags ParseOpenMode(Option_t *modestr);
+   Int_t ParseOpenMode(Option_t *in, TString &modestr,
+                       XrdCl::OpenFlags::Flags &mode, Bool_t assumeRead);
 
    TNetXNGFile(const TNetXNGFile &other);             // Not implemented
    TNetXNGFile &operator =(const TNetXNGFile &other); // Not implemented

@@ -151,8 +151,8 @@ protected:
   void calculatePartialBinVolume(const RooArgSet& dimSet) const ;
   void checkBinBounds() const;
 
-  void adjustBinning(const RooArgList& vars, TH1& href, Int_t* offset=0) ;
-  void importTH1(const RooArgList& vars, TH1& histo, Double_t initWgt, Bool_t doDensityCorrection) ;
+  void adjustBinning(const RooArgList& vars, const TH1& href, Int_t* offset=0) ;
+  void importTH1(const RooArgList& vars, const TH1& histo, Double_t initWgt, Bool_t doDensityCorrection) ;
   void importTH1Set(const RooArgList& vars, RooCategory& indexCat, std::map<std::string,TH1*> hmap, Double_t initWgt, Bool_t doDensityCorrection) ;
   void importDHistSet(const RooArgList& vars, RooCategory& indexCat, std::map<std::string,RooDataHist*> dmap, Double_t initWgt) ;
 
@@ -184,6 +184,10 @@ protected:
   std::vector<RooAbsLValue*> _lvvars ; //! List of observables casted as RooAbsLValue
   std::vector<const RooAbsBinning*> _lvbins ; //! List of used binnings associated with lvalues
   mutable std::vector<std::vector<Double_t> > _binbounds; //! list of bin bounds per dimension
+
+  mutable Int_t _cache_sum_valid ; //! Is cache sum valid
+  mutable Double_t _cache_sum ; //! Cache for sum of entries ;
+
 
 private:
 

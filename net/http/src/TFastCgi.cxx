@@ -15,33 +15,17 @@
 #include <unistd.h>
 #endif
 
-
 #ifndef HTTP_WITHOUT_FASTCGI
 
 #include "fcgiapp.h"
-#include <fstream>
+
 #include <stdlib.h>
 
 void FCGX_ROOT_send_file(FCGX_Request *request, const char *fname)
 {
-   std::ifstream is(fname);
+   Int_t length = 0;
 
-   char *buf = 0;
-   int length = 0;
-
-   if (is) {
-      is.seekg(0, is.end);
-      length = is.tellg();
-      is.seekg(0, is.beg);
-
-      buf = (char *) malloc(length);
-      is.read(buf, length);
-      if (!is) {
-         free(buf);
-         buf = 0;
-         length = 0;
-      }
-   }
+   char *buf = THttpServer::ReadFileContent(fname, length);
 
    if (buf == 0) {
       FCGX_FPrintF(request->out,
@@ -49,24 +33,6 @@ void FCGX_ROOT_send_file(FCGX_Request *request, const char *fname)
                    "Content-Length: 0\r\n" // Always set Content-Length
                    "Connection: close\r\n\r\n");
    } else {
-
-      /*      char sbuf[100], etag[100];
-            time_t curtime = time(NULL);
-            strftime(sbuf, sizeof(sbuf), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&curtime));
-            snprintf(etag, sizeof(etag), "\"%lx.%ld\"",
-                     (unsigned long) curtime, (long) length);
-
-            // Send HTTP reply to the client
-            FCGX_FPrintF(request->out,
-                   "HTTP/1.1 200 OK\r\n"
-                   "Date: %s\r\n"
-                   "Last-Modified: %s\r\n"
-                   "Etag: %s\r\n"
-                   "Content-Type: %s\r\n"
-                   "Content-Length: %d\r\n"     // Always set Content-Length
-                   "\r\n", sbuf, sbuf, etag, THttpServer::GetMimeType(fname), length);
-
-      */
 
       FCGX_FPrintF(request->out,
                    "Status: 200 OK\r\n"
@@ -123,7 +89,11 @@ void FCGX_ROOT_send_file(FCGX_Request *request, const char *fname)
 //////////////////////////////////////////////////////////////////////////
 
 
-//______________________________________________________________________________
+ClassImp(TFastCgi)
+
+////////////////////////////////////////////////////////////////////////////////
+/// normal constructor
+
 TFastCgi::TFastCgi() :
    THttpEngine("fastcgi", "fastcgi interface to webserver"),
    fSocket(0),
@@ -131,14 +101,13 @@ TFastCgi::TFastCgi() :
    fTopName(),
    fThrd(0)
 {
-   // normal constructor
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// destructor
+
 TFastCgi::~TFastCgi()
 {
-   // destructor
-
    if (fThrd) {
       // running thread will be killed
       fThrd->Kill();
@@ -153,12 +122,12 @@ TFastCgi::~TFastCgi()
    }
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// initializes fastcgi variables and start thread,
+/// which will process incoming http requests
+
 Bool_t TFastCgi::Create(const char *args)
 {
-   // initializes fastcgi variables and start thread,
-   // which will process incoming http requests
-
 #ifndef HTTP_WITHOUT_FASTCGI
    FCGX_Init();
 
@@ -170,13 +139,13 @@ Bool_t TFastCgi::Create(const char *args)
 
       // first extract port number
       sport = ":";
-      while ((*args!=0) && (*args>='0') && (*args<='9'))
+      while ((*args != 0) && (*args >= '0') && (*args <= '9'))
          sport.Append(*args++);
 
       // than search for extra parameters
-      while ((*args!=0) && (*args!='?')) args++;
+      while ((*args != 0) && (*args != '?')) args++;
 
-      if (*args=='?') {
+      if (*args == '?') {
          TUrl url(TString::Format("http://localhost/folder%s", args));
 
          if (url.IsValid()) {
@@ -193,7 +162,7 @@ Bool_t TFastCgi::Create(const char *args)
 //      Info("Create", "valid url opt %s debug = %d", url.GetOptions(), fDebugMode);
    }
 
-   Info("Create", "Starting FastCGI server on port %s", sport.Data()+1);
+   Info("Create", "Starting FastCGI server on port %s", sport.Data() + 1);
 
    fSocket = FCGX_OpenSocket(sport.Data(), 10);
    fThrd = new TThread("FastCgiThrd", TFastCgi::run_func, this);
@@ -208,7 +177,8 @@ Bool_t TFastCgi::Create(const char *args)
 }
 
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+
 void *TFastCgi::run_func(void *args)
 {
 #ifndef HTTP_WITHOUT_FASTCGI
@@ -231,11 +201,36 @@ void *TFastCgi::run_func(void *args)
 
       const char *inp_path = FCGX_GetParam("PATH_INFO", request.envp);
       const char *inp_query = FCGX_GetParam("QUERY_STRING", request.envp);
+      const char *inp_method = FCGX_GetParam("REQUEST_METHOD", request.envp);
+      const char *inp_length = FCGX_GetParam("CONTENT_LENGTH", request.envp);
 
       THttpCallArg arg;
       if (inp_path != 0) arg.SetPathAndFileName(inp_path);
       if (inp_query != 0) arg.SetQuery(inp_query);
+      if (inp_method != 0) arg.SetMethod(inp_method);
       if (engine->fTopName.Length() > 0) arg.SetTopName(engine->fTopName.Data());
+      int len = 0;
+      if (inp_length!=0) len = strtol(inp_length, NULL, 10);
+      if (len>0) {
+         void* buf = malloc(len+1); // one myte more for null-termination
+         int nread = FCGX_GetStr((char*) buf, len, request.in);
+         if (nread>0) arg.SetPostData(buf, nread);
+                 else free(buf);
+      }
+
+      TString header;
+      for (char **envp = request.envp; *envp != NULL; envp++) {
+         TString entry = *envp;
+         for (Int_t n=0;n<entry.Length();n++)
+            if (entry[n] == '=') { entry[n] = ':'; break; }
+         header.Append(entry);
+         header.Append("\r\n");
+      }
+      arg.SetRequestHeader(header);
+
+      TString username = arg.GetRequestHeader("REMOTE_USER");
+      if ((username.Length()>0) && (arg.GetRequestHeader("AUTH_TYPE").Length()>0))
+         arg.SetUserName(username);
 
       if (engine->fDebugMode) {
          FCGX_FPrintF(request.out,
@@ -243,40 +238,19 @@ void *TFastCgi::run_func(void *args)
                       "Content-type: text/html\r\n"
                       "\r\n"
                       "<title>FastCGI echo</title>"
-                      "<h1>FastCGI echo</h1>\n"
-                      "Request number %d<p>\n", count);
+                      "<h1>FastCGI echo</h1>\n");
 
-         char *contentLength = FCGX_GetParam("CONTENT_LENGTH", request.envp);
-         int len = 0;
-
-         if (contentLength != NULL)
-            len = strtol(contentLength, NULL, 10);
-
-         if (len <= 0) {
-            FCGX_FPrintF(request.out, "No data from standard input.<p>\n");
-         } else {
-            int i, ch;
-
-            FCGX_FPrintF(request.out, "Standard input:<br/>\n<pre>\n");
-            for (i = 0; i < len; i++) {
-               if ((ch = FCGX_GetChar(request.in)) < 0) {
-                  FCGX_FPrintF(request.out,
-                               "Error: Not enough bytes received on standard input<p>\n");
-                  break;
-               }
-               FCGX_PutChar(ch, request.out);
-            }
-            FCGX_FPrintF(request.out, "\n</pre><p>\n");
-         }
-
-         FCGX_FPrintF(request.out, "PATHNAME: %s<p>\n", arg.GetPathName());
-         FCGX_FPrintF(request.out, "FILENAME: %s<p>\n", arg.GetFileName());
-         FCGX_FPrintF(request.out, "QUERY:    %s<p>\n", arg.GetQuery());
-         FCGX_FPrintF(request.out, "<p>\n");
+         FCGX_FPrintF(request.out, "Request %d:<br/>\n<pre>\n", count);
+         FCGX_FPrintF(request.out, "  Method   : %s\n", arg.GetMethod());
+         FCGX_FPrintF(request.out, "  PathName : %s\n", arg.GetPathName());
+         FCGX_FPrintF(request.out, "  FileName : %s\n", arg.GetFileName());
+         FCGX_FPrintF(request.out, "  Query    : %s\n", arg.GetQuery());
+         FCGX_FPrintF(request.out, "  PostData : %ld\n", arg.GetPostDataLength());
+         FCGX_FPrintF(request.out, "</pre><p>\n");
 
          FCGX_FPrintF(request.out, "Environment:<br/>\n<pre>\n");
          for (char **envp = request.envp; *envp != NULL; envp++) {
-            FCGX_FPrintF(request.out, "%s\n", *envp);
+            FCGX_FPrintF(request.out, "  %s\n", *envp);
          }
          FCGX_FPrintF(request.out, "</pre><p>\n");
 
@@ -303,6 +277,9 @@ void *TFastCgi::run_func(void *args)
       } else if (arg.IsFile()) {
          FCGX_ROOT_send_file(&request, (const char *) arg.GetContent());
       } else {
+
+         // TODO: check in request header that gzip encoding is supported
+         if (arg.GetZipping() > 0) arg.CompressWithGzip();
 
          arg.FillHttpHeader(hdr, "Status:");
          FCGX_FPrintF(request.out, hdr.Data());

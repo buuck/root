@@ -16,7 +16,6 @@
 #ifndef ROO_ABS_OPT_TEST_STATISTIC
 #define ROO_ABS_OPT_TEST_STATISTIC
 
-#include "Riosfwd.h"
 #include "RooAbsTestStatistic.h"
 #include "RooSetProxy.h"
 #include "RooCategoryProxy.h"
@@ -55,6 +54,7 @@ public:
   void seal(const char* notice="") { _sealed = kTRUE ; _sealNotice = notice ; }
   Bool_t isSealed() const { return _sealed ; }
   const char* sealNotice() const { return _sealNotice.Data() ; }
+
 
 protected:
 

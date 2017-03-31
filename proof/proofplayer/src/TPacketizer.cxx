@@ -9,20 +9,18 @@
  * For the list of contributors see $ROOTSYS/README/CREDITS.             *
  *************************************************************************/
 
-//////////////////////////////////////////////////////////////////////////
-//                                                                      //
-// TPacketizer                                                          //
-//                                                                      //
-// This class generates packets to be processed on PROOF worker servers.//
-// A packet is an event range (begin entry and number of entries) or    //
-// object range (first object and number of objects) in a TTree         //
-// (entries) or a directory (objects) in a file.                        //
-// Packets are generated taking into account the performance of the     //
-// remote machine, the time it took to process a previous packet on     //
-// the remote machine, the locality of the database files, etc.         //
-//                                                                      //
-//////////////////////////////////////////////////////////////////////////
+/** \class TPacketizer
+\ingroup proofkernel
 
+This class generates packets to be processed on PROOF worker servers.
+A packet is an event range (begin entry and number of entries) or
+object range (first object and number of objects) in a TTree
+(entries) or a directory (objects) in a file.
+Packets are generated taking into account the performance of the
+remote machine, the time it took to process a previous packet on
+the remote machine, the locality of the database files, etc.
+
+*/
 
 #include "TPacketizer.h"
 
@@ -237,11 +235,11 @@ TPacketizer::TSlaveStat::TSlaveStat(TSlave *slave)
    fStatus = new TProofProgressStatus();
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Cleanup
+
 TPacketizer::TSlaveStat::~TSlaveStat()
 {
-   // Cleanup
-
    SafeDelete(fStatus);
 }
 
@@ -271,49 +269,53 @@ TProofProgressStatus *TPacketizer::TSlaveStat::AddProcessed(TProofProgressStatus
 
 ClassImp(TPacketizer)
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Constructor
+
 TPacketizer::TPacketizer(TDSet *dset, TList *slaves, Long64_t first,
                          Long64_t num, TList *input, TProofProgressStatus *st)
             : TVirtualPacketizer(input, st)
 {
-   // Constructor
-
    PDB(kPacketizer,1) Info("TPacketizer", "Enter (first %lld, num %lld)", first, num);
 
    // Init pointer members
-   fSlaveStats = 0;
    fPackets = 0;
-   fSlaveStats = 0;
    fUnAllocated = 0;
    fActive = 0;
    fFileNodes = 0;
    fMaxPerfIdx = 1;
    fMaxSlaveCnt = 0;
+   fHeuristicPSiz = kFALSE;
+   fDefMaxWrkNode = kTRUE;
 
    if (!fProgressStatus) {
-      Error("TPacketizerAdaptive", "No progress status");
+      Error("TPacketizer", "No progress status");
       return;
    }
 
    Long_t maxSlaveCnt = 0;
    if (TProof::GetParameter(input, "PROOF_MaxSlavesPerNode", maxSlaveCnt) == 0) {
-      if (maxSlaveCnt < 1) {
-         Warning("TPacketizer", "PROOF_MaxSlavesPerNode must be grater than 0");
+      if (maxSlaveCnt < 0) {
+         Warning("TPacketizer", "PROOF_MaxSlavesPerNode must be positive");
          maxSlaveCnt = 0;
       }
+      if (maxSlaveCnt > 0) fDefMaxWrkNode = kFALSE;
    } else {
       // Try also with Int_t (recently supported in TProof::SetParameter)
       Int_t mxslcnt = -1;
       if (TProof::GetParameter(input, "PROOF_MaxSlavesPerNode", mxslcnt) == 0) {
-         if (mxslcnt < 1) {
-            Warning("TPacketizer", "PROOF_MaxSlavesPerNode must be grater than 0");
+         if (mxslcnt < 0) {
+            Warning("TPacketizer", "PROOF_MaxSlavesPerNode must be positive");
             mxslcnt = 0;
          }
          maxSlaveCnt = (Long_t) mxslcnt;
+         if (maxSlaveCnt > 0) fDefMaxWrkNode = kFALSE;
       }
    }
-   if (!maxSlaveCnt)
-      maxSlaveCnt = gEnv->GetValue("Packetizer.MaxWorkersPerNode", 4);
+   if (!maxSlaveCnt) {
+      maxSlaveCnt = gEnv->GetValue("Packetizer.MaxWorkersPerNode", slaves->GetSize());
+      if (maxSlaveCnt != slaves->GetSize()) fDefMaxWrkNode = kFALSE;
+   }
    if (maxSlaveCnt > 0) {
       fMaxSlaveCnt = maxSlaveCnt;
       PDB(kPacketizer,1)
@@ -376,13 +378,9 @@ TPacketizer::TPacketizer(TDSet *dset, TList *slaves, Long64_t first,
    fSlaveStats = new TMap;
    fSlaveStats->SetOwner(kFALSE);
 
-   TSlave *slave;
-   TIter si(slaves);
-   while ((slave = (TSlave*) si.Next())) {
-      fSlaveStats->Add( slave, new TSlaveStat(slave) );
-      fMaxPerfIdx = slave->GetPerfIdx() > fMaxPerfIdx ?
-         slave->GetPerfIdx() : fMaxPerfIdx;
-   }
+   // Record initial available workers
+   Int_t nwrks = AddWorkers(slaves);
+   Info("TPacketizer", "Initial number of workers: %d", nwrks);
 
    // Setup file & filenode structure
    Reset();
@@ -392,7 +390,7 @@ TPacketizer::TPacketizer(TDSet *dset, TList *slaves, Long64_t first,
    Bool_t byfile = (gprc == 0 && validateMode > 0 && num > -1) ? kTRUE : kFALSE;
    if (num > -1)
       PDB(kPacketizer,2)
-         Info("TPacketizerAdaptive",
+         Info("TPacketizer",
               "processing subset of entries: validating by file? %s", byfile ? "yes": "no");
    ValidateFiles(dset, slaves, num, byfile);
 
@@ -560,6 +558,7 @@ TPacketizer::TPacketizer(TDSet *dset, TList *slaves, Long64_t first,
       Info("Process","using alternate packet size: %lld", fPacketSize);
    } else {
       // Heuristic for starting packet size
+      fHeuristicPSiz = kTRUE;
       Int_t nslaves = fSlaveStats->GetSize();
       if (nslaves > 0) {
          fPacketSize = fTotalEntries / (fPacketAsAFraction * nslaves);
@@ -577,11 +576,11 @@ TPacketizer::TPacketizer(TDSet *dset, TList *slaves, Long64_t first,
    PDB(kPacketizer,1) Info("TPacketizer", "Return");
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Destructor.
+
 TPacketizer::~TPacketizer()
 {
-   // Destructor.
-
    if (fSlaveStats) {
       fSlaveStats->DeleteValues();
    }
@@ -593,11 +592,49 @@ TPacketizer::~TPacketizer()
    SafeDelete(fFileNodes);
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Adds new workers. Returns the number of workers added, or -1 on failure.
+
+Int_t TPacketizer::AddWorkers(TList *workers)
+{
+   if (!workers) {
+      Error("AddWorkers", "Null list of new workers!");
+      return -1;
+   }
+
+   Int_t curNumOfWrks = fSlaveStats->GetEntries();
+
+   TSlave *sl;
+   TIter next(workers);
+   while (( sl = dynamic_cast<TSlave*>(next()) ))
+      if (!fSlaveStats->FindObject(sl)) {
+         fSlaveStats->Add(sl, new TSlaveStat(sl));
+         fMaxPerfIdx = sl->GetPerfIdx() > fMaxPerfIdx ? sl->GetPerfIdx() : fMaxPerfIdx;
+      }
+
+   // If heuristic (and new workers) set the packet size
+   Int_t nwrks = fSlaveStats->GetSize();
+   if (fHeuristicPSiz && nwrks > curNumOfWrks) {
+      if (nwrks > 0) {
+         fPacketSize = fTotalEntries / (fPacketAsAFraction * nwrks);
+         if (fPacketSize < 1) fPacketSize = 1;
+      } else {
+         fPacketSize = 1;
+      }
+   }
+
+   // Update the max number that can access one file node if the default is used
+   if (fDefMaxWrkNode && nwrks > fMaxSlaveCnt) fMaxSlaveCnt = nwrks;
+
+   // Done
+   return nwrks;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+/// Get next unallocated file.
+
 TPacketizer::TFileStat *TPacketizer::GetNextUnAlloc(TFileNode *node)
 {
-   // Get next unallocated file.
-
    TFileStat *file = 0;
 
    if (node != 0) {
@@ -620,11 +657,11 @@ TPacketizer::TFileStat *TPacketizer::GetNextUnAlloc(TFileNode *node)
    return file;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Get next unallocated node.
+
 TPacketizer::TFileNode *TPacketizer::NextUnAllocNode()
 {
-   // Get next unallocated node.
-
    fUnAllocated->Sort();
    PDB(kPacketizer,2) {
       std::cout << "TPacketizer::NextUnAllocNode()" << std::endl;
@@ -641,19 +678,19 @@ TPacketizer::TFileNode *TPacketizer::NextUnAllocNode()
    return fn;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Remove unallocated node.
+
 void TPacketizer::RemoveUnAllocNode(TFileNode * node)
 {
-   // Remove unallocated node.
-
    fUnAllocated->Remove(node);
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Get next active file.
+
 TPacketizer::TFileStat *TPacketizer::GetNextActive()
 {
-   // Get next active file.
-
    TFileNode *node;
    TFileStat *file = 0;
 
@@ -665,50 +702,51 @@ TPacketizer::TFileStat *TPacketizer::GetNextActive()
    return file;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Get next active node.
+
 TPacketizer::TFileNode *TPacketizer::NextActiveNode()
 {
-   // Get next active node.
-
    fActive->Sort();
    PDB(kPacketizer,2) {
-      std::cout << "TPacketizer::NextActiveNode()" << std::endl;
+      Printf("TPacketizer::NextActiveNode : ----------------------");
       fActive->Print();
    }
 
    TFileNode *fn = (TFileNode*) fActive->First();
    if (fn != 0 && fMaxSlaveCnt > 0 && fn->GetSlaveCnt() >= fMaxSlaveCnt) {
-      PDB(kPacketizer,1) Info("NextActiveNode", "reached workers per node limit (%ld)", fMaxSlaveCnt);
+      PDB(kPacketizer,1)
+         Info("NextActiveNode", "reached workers per node limit (%ld)", fMaxSlaveCnt);
       fn = 0;
    }
 
    return fn;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Remove file from the list of actives.
+
 void TPacketizer::RemoveActive(TFileStat *file)
 {
-   // Remove file from the list of actives.
-
    TFileNode *node = file->GetNode();
 
    node->RemoveActive(file);
    if (node->GetNumberOfActiveFiles() == 0) RemoveActiveNode(node);
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Remove node from the list of actives.
+
 void TPacketizer::RemoveActiveNode(TFileNode *node)
 {
-   // Remove node from the list of actives.
-
    fActive->Remove(node);
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Reset the internal datastructure for packet distribution.
+
 void TPacketizer::Reset()
 {
-   // Reset the internal datastructure for packet distribution.
-
    fUnAllocated->Clear();
    fUnAllocated->AddAll(fFileNodes);
 
@@ -737,12 +775,12 @@ void TPacketizer::Reset()
    }
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Check existence of file/dir/tree an get number of entries.
+/// Assumes the files have been setup.
+
 void TPacketizer::ValidateFiles(TDSet *dset, TList *slaves, Long64_t maxent, Bool_t byfile)
 {
-   // Check existence of file/dir/tree an get number of entries.
-   // Assumes the files have been setup.
-
    TMap     slaves_by_sock;
    TMonitor mon;
    TList    workers;
@@ -1057,11 +1095,11 @@ void TPacketizer::ValidateFiles(TDSet *dset, TList *slaves, Long64_t maxent, Boo
    }
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Get entries processed by the specified slave.
+
 Long64_t TPacketizer::GetEntriesProcessed(TSlave *slave) const
 {
-   // Get entries processed by the specified slave.
-
    if ( fSlaveStats == 0 ) return 0;
 
    TSlaveStat *slstat = (TSlaveStat*) fSlaveStats->GetValue( slave );
@@ -1071,12 +1109,12 @@ Long64_t TPacketizer::GetEntriesProcessed(TSlave *slave) const
    return slstat->GetEntriesProcessed();
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Get Estimation of the current rate; just summing the current rates of
+/// the active workers
+
 Float_t TPacketizer::GetCurrentRate(Bool_t &all)
 {
-   // Get Estimation of the current rate; just summing the current rates of
-   // the active workers
-
    all = kTRUE;
    // Loop over the workers
    Float_t currate = 0.;
@@ -1097,21 +1135,23 @@ Float_t TPacketizer::GetCurrentRate(Bool_t &all)
    return currate;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Get next packet
+
 TDSetElement *TPacketizer::GetNextPacket(TSlave *sl, TMessage *r)
 {
-   // Get next packet
-
    if ( !fValid ) {
       return 0;
    }
 
-   // find slave
+   // Find worker
 
    TSlaveStat *slstat = (TSlaveStat*) fSlaveStats->GetValue( sl );
 
    R__ASSERT( slstat != 0 );
 
+   PDB(kPacketizer,1)
+      Info("GetNextPacket","worker-%s (%s)", sl->GetOrdinal(), sl->GetName());
    // update stats & free old element
 
    Bool_t firstPacket = kFALSE;
@@ -1270,11 +1310,11 @@ TDSetElement *TPacketizer::GetNextPacket(TSlave *sl, TMessage *r)
    return slstat->fCurElem;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Return the number of workers still processing
+
 Int_t TPacketizer::GetActiveWorkers()
 {
-   // Return the number of workers still processing
-
    Int_t actw = 0;
    TIter nxw(fSlaveStats);
    TObject *key;

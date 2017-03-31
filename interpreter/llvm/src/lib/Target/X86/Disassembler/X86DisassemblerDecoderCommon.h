@@ -14,8 +14,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef X86DISASSEMBLERDECODERCOMMON_H
-#define X86DISASSEMBLERDECODERCOMMON_H
+#ifndef LLVM_LIB_TARGET_X86_DISASSEMBLER_X86DISASSEMBLERDECODERCOMMON_H
+#define LLVM_LIB_TARGET_X86_DISASSEMBLER_X86DISASSEMBLERDECODERCOMMON_H
 
 #include "llvm/Support/DataTypes.h"
 
@@ -82,6 +82,7 @@ enum attributeBits {
                                         "operands change width")               \
   ENUM_ENTRY(IC_ADSIZE,             3,  "requires an ADSIZE prefix, so "       \
                                         "operands change width")               \
+  ENUM_ENTRY(IC_OPSIZE_ADSIZE,      4,  "requires ADSIZE and OPSIZE prefixes") \
   ENUM_ENTRY(IC_XD,                 2,  "may say something about the opcode "  \
                                         "but not the operands")                \
   ENUM_ENTRY(IC_XS,                 2,  "may say something about the opcode "  \
@@ -90,20 +91,24 @@ enum attributeBits {
                                         "operands change width")               \
   ENUM_ENTRY(IC_XS_OPSIZE,          3,  "requires an OPSIZE prefix, so "       \
                                         "operands change width")               \
-  ENUM_ENTRY(IC_64BIT_REXW,         4,  "requires a REX.W prefix, so operands "\
+  ENUM_ENTRY(IC_64BIT_REXW,         5,  "requires a REX.W prefix, so operands "\
                                         "change width; overrides IC_OPSIZE")   \
+  ENUM_ENTRY(IC_64BIT_REXW_ADSIZE,  6,  "requires a REX.W prefix and 0x67 "    \
+                                        "prefix")                              \
   ENUM_ENTRY(IC_64BIT_OPSIZE,       3,  "Just as meaningful as IC_OPSIZE")     \
   ENUM_ENTRY(IC_64BIT_ADSIZE,       3,  "Just as meaningful as IC_ADSIZE")     \
-  ENUM_ENTRY(IC_64BIT_XD,           5,  "XD instructions are SSE; REX.W is "   \
+  ENUM_ENTRY(IC_64BIT_OPSIZE_ADSIZE, 4, "Just as meaningful as IC_OPSIZE/"     \
+                                        "IC_ADSIZE")                           \
+  ENUM_ENTRY(IC_64BIT_XD,           6,  "XD instructions are SSE; REX.W is "   \
                                         "secondary")                           \
-  ENUM_ENTRY(IC_64BIT_XS,           5,  "Just as meaningful as IC_64BIT_XD")   \
+  ENUM_ENTRY(IC_64BIT_XS,           6,  "Just as meaningful as IC_64BIT_XD")   \
   ENUM_ENTRY(IC_64BIT_XD_OPSIZE,    3,  "Just as meaningful as IC_XD_OPSIZE")  \
   ENUM_ENTRY(IC_64BIT_XS_OPSIZE,    3,  "Just as meaningful as IC_XS_OPSIZE")  \
-  ENUM_ENTRY(IC_64BIT_REXW_XS,      6,  "OPSIZE could mean a different "       \
+  ENUM_ENTRY(IC_64BIT_REXW_XS,      7,  "OPSIZE could mean a different "       \
                                         "opcode")                              \
-  ENUM_ENTRY(IC_64BIT_REXW_XD,      6,  "Just as meaningful as "               \
+  ENUM_ENTRY(IC_64BIT_REXW_XD,      7,  "Just as meaningful as "               \
                                         "IC_64BIT_REXW_XS")                    \
-  ENUM_ENTRY(IC_64BIT_REXW_OPSIZE,  7,  "The Dynamic Duo!  Prefer over all "   \
+  ENUM_ENTRY(IC_64BIT_REXW_OPSIZE,  8,  "The Dynamic Duo!  Prefer over all "   \
                                         "else because this changes most "      \
                                         "operands' meaning")                   \
   ENUM_ENTRY(IC_VEX,                1,  "requires a VEX prefix")               \
@@ -347,12 +352,6 @@ enum ModRMDecisionType {
   ENUM_ENTRY(ENCODING_RM_CD64,"R/M operand with CDisp scaling of 64")          \
   ENUM_ENTRY(ENCODING_VVVV,   "Register operand in VEX.vvvv byte.")            \
   ENUM_ENTRY(ENCODING_WRITEMASK, "Register operand in EVEX.aaa byte.")         \
-  ENUM_ENTRY(ENCODING_CB,     "1-byte code offset (possible new CS value)")    \
-  ENUM_ENTRY(ENCODING_CW,     "2-byte")                                        \
-  ENUM_ENTRY(ENCODING_CD,     "4-byte")                                        \
-  ENUM_ENTRY(ENCODING_CP,     "6-byte")                                        \
-  ENUM_ENTRY(ENCODING_CO,     "8-byte")                                        \
-  ENUM_ENTRY(ENCODING_CT,     "10-byte")                                       \
   ENUM_ENTRY(ENCODING_IB,     "1-byte immediate")                              \
   ENUM_ENTRY(ENCODING_IW,     "2-byte")                                        \
   ENUM_ENTRY(ENCODING_ID,     "4-byte")                                        \
@@ -401,6 +400,8 @@ enum OperandEncoding {
   ENUM_ENTRY(TYPE_IMM64,      "8-byte")                                        \
   ENUM_ENTRY(TYPE_IMM3,       "1-byte immediate operand between 0 and 7")      \
   ENUM_ENTRY(TYPE_IMM5,       "1-byte immediate operand between 0 and 31")     \
+  ENUM_ENTRY(TYPE_AVX512ICC,  "1-byte immediate operand for AVX512 icmp")      \
+  ENUM_ENTRY(TYPE_UIMM8,      "1-byte unsigned immediate operand")             \
   ENUM_ENTRY(TYPE_RM8,        "1-byte register or memory operand")             \
   ENUM_ENTRY(TYPE_RM16,       "2-byte")                                        \
   ENUM_ENTRY(TYPE_RM32,       "4-byte")                                        \
@@ -416,10 +417,6 @@ enum OperandEncoding {
   ENUM_ENTRY(TYPE_M1616,      "2+2-byte segment+offset address")               \
   ENUM_ENTRY(TYPE_M1632,      "2+4-byte")                                      \
   ENUM_ENTRY(TYPE_M1664,      "2+8-byte")                                      \
-  ENUM_ENTRY(TYPE_M16_32,     "2+4-byte two-part memory operand (LIDT, LGDT)") \
-  ENUM_ENTRY(TYPE_M16_16,     "2+2-byte (BOUND)")                              \
-  ENUM_ENTRY(TYPE_M32_32,     "4+4-byte (BOUND)")                              \
-  ENUM_ENTRY(TYPE_M16_64,     "2+8-byte (LIDT, LGDT)")                         \
   ENUM_ENTRY(TYPE_SRCIDX8,    "1-byte memory at source index")                 \
   ENUM_ENTRY(TYPE_SRCIDX16,   "2-byte memory at source index")                 \
   ENUM_ENTRY(TYPE_SRCIDX32,   "4-byte memory at source index")                 \
@@ -433,20 +430,11 @@ enum OperandEncoding {
   ENUM_ENTRY(TYPE_MOFFS16,    "2-byte")                                        \
   ENUM_ENTRY(TYPE_MOFFS32,    "4-byte")                                        \
   ENUM_ENTRY(TYPE_MOFFS64,    "8-byte")                                        \
-  ENUM_ENTRY(TYPE_SREG,       "Byte with single bit set: 0 = ES, 1 = CS, "     \
-                              "2 = SS, 3 = DS, 4 = FS, 5 = GS")                \
   ENUM_ENTRY(TYPE_M32FP,      "32-bit IEE754 memory floating-point operand")   \
   ENUM_ENTRY(TYPE_M64FP,      "64-bit")                                        \
   ENUM_ENTRY(TYPE_M80FP,      "80-bit extended")                               \
-  ENUM_ENTRY(TYPE_M16INT,     "2-byte memory integer operand for use in "      \
-                              "floating-point instructions")                   \
-  ENUM_ENTRY(TYPE_M32INT,     "4-byte")                                        \
-  ENUM_ENTRY(TYPE_M64INT,     "8-byte")                                        \
   ENUM_ENTRY(TYPE_ST,         "Position on the floating-point stack")          \
-  ENUM_ENTRY(TYPE_MM,         "MMX register operand")                          \
-  ENUM_ENTRY(TYPE_MM32,       "4-byte MMX register or memory operand")         \
-  ENUM_ENTRY(TYPE_MM64,       "8-byte")                                        \
-  ENUM_ENTRY(TYPE_XMM,        "XMM register operand")                          \
+  ENUM_ENTRY(TYPE_MM64,       "8-byte MMX register")                           \
   ENUM_ENTRY(TYPE_XMM32,      "4-byte XMM register or memory operand")         \
   ENUM_ENTRY(TYPE_XMM64,      "8-byte")                                        \
   ENUM_ENTRY(TYPE_XMM128,     "16-byte")                                       \
@@ -459,10 +447,10 @@ enum OperandEncoding {
   ENUM_ENTRY(TYPE_VK16,       "16-bit")                                        \
   ENUM_ENTRY(TYPE_VK32,       "32-bit")                                        \
   ENUM_ENTRY(TYPE_VK64,       "64-bit")                                        \
-  ENUM_ENTRY(TYPE_XMM0,       "Implicit use of XMM0")                          \
   ENUM_ENTRY(TYPE_SEGMENTREG, "Segment register operand")                      \
   ENUM_ENTRY(TYPE_DEBUGREG,   "Debug register operand")                        \
   ENUM_ENTRY(TYPE_CONTROLREG, "Control register operand")                      \
+  ENUM_ENTRY(TYPE_BNDR,       "MPX bounds register")                           \
                                                                                \
   ENUM_ENTRY(TYPE_Mv,         "Memory operand of operand size")                \
   ENUM_ENTRY(TYPE_Rv,         "Register operand of operand size")              \
@@ -488,19 +476,7 @@ struct OperandSpecifier {
   uint8_t type;
 };
 
-// Indicates where the opcode modifier (if any) is to be found.  Extended
-// opcodes with AddRegFrm have the opcode modifier in the ModR/M byte.
-#define MODIFIER_TYPES        \
-  ENUM_ENTRY(MODIFIER_NONE)
-
-#define ENUM_ENTRY(n) n,
-enum ModifierType {
-  MODIFIER_TYPES
-  MODIFIER_max
-};
-#undef ENUM_ENTRY
-
-static const unsigned X86_MAX_OPERANDS = 5;
+static const unsigned X86_MAX_OPERANDS = 6;
 
 /// Decoding mode for the Intel disassembler.  16-bit, 32-bit, and 64-bit mode
 /// are supported, and represent real mode, IA-32e, and IA-32e in 64-bit mode,

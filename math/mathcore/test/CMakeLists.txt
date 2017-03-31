@@ -7,6 +7,7 @@ set(Libraries Core RIO Net Hist Graf Graf3d Gpad Tree
               Rint Postscript Matrix Physics MathCore Thread)
 
 set(TestSource
+    testMathRandom.cxx
     testTMath.cxx
     testBinarySearch.cxx
     testSortOrder.cxx
@@ -26,6 +27,7 @@ set(TestSource
     testSpecFuncBetaI.cxx 
     testSpecFuncSiCi.cxx 
     testIntegrationMultiDim.cxx
+    testAnalyticalIntegrals.cxx
     testTStatistic.cxx
     fit/testFit.cxx
     fit/testGraphFit.cxx
@@ -33,6 +35,8 @@ set(TestSource
     fit/SparseFit4.cxx
     fit/SparseFit3.cxx )
 
+set(testMathRandom_LABELS longtest)
+set(testFitPerf_LABELS longtest)
 
 if(ROOT_roofit_FOUND)
   list(APPEND TestSource fit/testRooFit.cxx)
@@ -57,6 +61,6 @@ endif()
 foreach(file ${TestSource})
   get_filename_component(testname ${file} NAME_WE)
   ROOT_EXECUTABLE(${testname} ${file} LIBRARIES ${Libraries})
-  ROOT_ADD_TEST(mathcore-${testname} COMMAND ${testname})
+  ROOT_ADD_TEST(mathcore-${testname} COMMAND ${testname} LABELS ${${testname}_LABELS})
 endforeach()
 

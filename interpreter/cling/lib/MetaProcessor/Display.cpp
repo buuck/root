@@ -91,31 +91,55 @@ int NumberOfElements(const ArrayType* type)
 }
 
 //______________________________________________________________________________
-void AppendClassDeclLocation(const CompilerInstance* compiler, const CXXRecordDecl* classDecl,
-                             std::string& textLine, bool verbose)
+static void AppendAnyDeclLocation(const CompilerInstance* compiler,
+                                  SourceLocation loc,
+                                  std::string& textLine,
+                                  const char* format,
+                                  const char* formatNull,
+                                  const char* filenameNull)
 {
-  //Location has a fixed format - from G__display_class.
+  assert(compiler != 0 && "AppendAnyDeclLocation, 'compiler' parameter is null");
 
-  assert(compiler != 0 && "AppendClassDeclLocation, 'compiler' parameter is null");
-  assert(classDecl != 0 && "AppendClassDeclLocation, 'classDecl' parameter is null");
-
-  const char* const emptyName = "";
   llvm::raw_string_ostream rss(textLine);
   llvm::formatted_raw_ostream frss(rss);
+  std::string baseName;
+  int lineNo = -2;
+
 
   if (compiler->hasSourceManager()) {
     const SourceManager &sourceManager = compiler->getSourceManager();
-    PresumedLoc loc(sourceManager.getPresumedLoc(classDecl->getLocation()));
-    if (loc.isValid()) {
-      const std::string baseName(llvm::sys::path::filename(loc.getFilename()).str());
-      if (!verbose)
-        frss<<llvm::format("%-25s%5d", baseName.size() ? baseName.c_str() : "", int(loc.getLine()));
-      else
-        frss<<llvm::format("FILE: %s LINE: %d", baseName.size() ? baseName.c_str() : "", int(loc.getLine()));
-    } else
-      frss<<llvm::format("%-30s", emptyName);
-  } else
-    frss<<llvm::format("%-30s", emptyName);
+    if (loc.isValid() && sourceManager.isLoadedSourceLocation(loc)) {
+      // No line numbers as they would touich disk.
+      baseName = llvm::sys::path::filename(sourceManager.getFilename(loc));
+      lineNo = -1;
+    } else {
+      PresumedLoc ploc(sourceManager.getPresumedLoc(loc));
+      if (ploc.isValid()) {
+        baseName = llvm::sys::path::filename(ploc.getFilename()).str();
+        lineNo = (int)ploc.getLine();
+      }
+    }
+  }
+  if (lineNo == -2)
+    frss<<llvm::format(formatNull, filenameNull);
+  else
+    frss<<llvm::format(format, baseName.c_str(), lineNo);
+}
+
+//______________________________________________________________________________
+void AppendClassDeclLocation(const CompilerInstance* compiler, const CXXRecordDecl* classDecl,
+                             std::string& textLine, bool verbose)
+{
+  assert(classDecl != 0 && "AppendClassDeclLocation, 'classDecl' parameter is null");
+
+  //Location has a fixed format - from G__display_class.
+  static const char* formatShort = "%-25s%5d";
+  static const char* formatVerbose = "FILE: %s LINE: %d";
+  const char* format = formatShort;
+  if (verbose)
+    format = formatVerbose;
+  AppendAnyDeclLocation(compiler, classDecl->getLocation(), textLine,
+                        format, "%-30s", "");
 }
 
 //______________________________________________________________________________
@@ -138,51 +162,23 @@ void AppendMemberFunctionLocation(const CompilerInstance* compiler, const Decl* 
 void AppendDeclLocation(const CompilerInstance* compiler, const Decl* decl,
                         std::string& textLine)
 {
-  assert(compiler != 0 && "AppendDeclLocation, 'compiler' parameter is null");
-  assert(decl != 0 && "AppendDeclLocation, 'decl' parameter is null");
 
-  static const char* const unknownLocation = "compiled";
-  llvm::raw_string_ostream rss(textLine);
-  llvm::formatted_raw_ostream frss(rss);
-
-  if (compiler->hasSourceManager()) {
-    const SourceManager& sourceManager = compiler->getSourceManager();
-    PresumedLoc loc(sourceManager.getPresumedLoc(decl->getLocation()));
-    if (loc.isValid()) {  //The format is from CINT.
-      const std::string baseName(llvm::sys::path::filename(loc.getFilename()).str());
-      frss<<llvm::format("%-15s%4d", baseName.size() ? baseName.c_str() : "", int(loc.getLine()));
-    } else
-      frss<<llvm::format("%-15s    ", unknownLocation);
-  } else {
-    frss<<llvm::format("%-15s    ", unknownLocation);
-  }
+  AppendAnyDeclLocation(compiler, decl->getLocation(), textLine,
+                        "%-15s%4d", "%-15s    ", "compiled");
 }
 
 //______________________________________________________________________________
 void AppendMacroLocation(const CompilerInstance* compiler, const MacroInfo* macroInfo,
                          std::string& textLine)
 {
-  assert(compiler != 0 && "AppendMacroLocation, 'compiler' parameter is null");
   assert(macroInfo != 0 && "AppendMacroLocation, 'macroInfo' parameter is null");
 
   //TODO: check what does location for macro definition really means -
   //macro can be defined many times, what do we have in a TranslationUnit in this case?
   //At the moment this function is similar to AppendDeclLocation.
 
-  const char* const unknownLocation = "(unknown)";
-  llvm::raw_string_ostream rss(textLine);
-  llvm::formatted_raw_ostream frss(rss);
-
-  if (compiler->hasSourceManager()) {
-    const SourceManager &sourceManager = compiler->getSourceManager();
-    PresumedLoc loc(sourceManager.getPresumedLoc(macroInfo->getDefinitionLoc()));
-    if (loc.isValid()) {  //The format is from CINT.
-      const std::string baseName(llvm::sys::path::filename(loc.getFilename()).str());
-      frss<<llvm::format("%-15s%4d", baseName.size() ? baseName.c_str() : "", int(loc.getLine()));
-    } else
-      frss<<llvm::format("%-15s    ", unknownLocation);
-  } else
-    frss<<llvm::format("%-15s    ", unknownLocation);
+  AppendAnyDeclLocation(compiler, macroInfo->getDefinitionLoc(), textLine,
+                        "%-15s%4d", "%-15s    ", "(unknown)");
 }
 
 //______________________________________________________________________________
@@ -454,7 +450,6 @@ public:
 
   void SetVerbose(bool verbose);
 
-  void Reset();
 private:
 
   //These are declarations, which can contain nested class declarations,
@@ -560,12 +555,6 @@ void ClassPrinter::DisplayClass(const std::string& className)const
 void ClassPrinter::SetVerbose(bool verbose)
 {
   fVerbose = verbose;
-}
-
-//______________________________________________________________________________
-void ClassPrinter::Reset()
-{
-  fSeenDecls.clear();
 }
 
 //______________________________________________________________________________
@@ -679,7 +668,7 @@ void ClassPrinter::ProcessLinkageSpecDecl(decl_iterator decl)const
 }
 
 //______________________________________________________________________________
-void ClassPrinter::ProcessClassDecl(decl_iterator decl)const
+void ClassPrinter::ProcessClassDecl(decl_iterator decl) const
 {
   assert(fInterpreter != 0 && "ProcessClassDecl, fInterpreter is null");
   assert(*decl != 0 && "ProcessClassDecl, 'decl' parameter is not a valid iterator");
@@ -696,9 +685,10 @@ void ClassPrinter::ProcessClassDecl(decl_iterator decl)const
 
   // Could trigger deserialization of decls.
   Interpreter::PushTransactionRAII RAII(const_cast<Interpreter*>(fInterpreter));
-  //Now we have to check nested scopes for class declarations.
-  for (decl_iterator decl = classDecl->decls_begin(); decl != classDecl->decls_end(); ++decl)
-    ProcessDecl(decl);
+  // Now we have to check nested scopes for class declarations.
+  for (decl_iterator nestedDecl = classDecl->decls_begin();
+       nestedDecl != classDecl->decls_end(); ++nestedDecl)
+    ProcessDecl(nestedDecl);
 }
 
 //______________________________________________________________________________
@@ -1133,9 +1123,9 @@ void GlobalsPrinter::DisplayGlobals()const
   //Try to print global macro definitions (object-like only).
   const Preprocessor& pp = compiler->getPreprocessor();
   for (macro_iterator macro = pp.macro_begin(); macro != pp.macro_end(); ++macro) {
-    if (macro->second->getMacroInfo()
-        && macro->second->getMacroInfo()->isObjectLike())
-      DisplayObjectLikeMacro(macro->first, macro->second->getMacroInfo());
+    auto MI = macro->second.getLatest()->getMacroInfo();
+    if (MI && MI->isObjectLike())
+      DisplayObjectLikeMacro(macro->first, MI);
   }
 
   //TODO: fSeenDecls - should I check that some declaration is already visited?
@@ -1172,17 +1162,16 @@ void GlobalsPrinter::DisplayGlobal(const std::string& name)const
   const TranslationUnitDecl* const tuDecl = compiler->getASTContext().getTranslationUnitDecl();
   assert(tuDecl != 0 && "DisplayGlobal, translation unit is empty");
 
-  //fSeenDecls.clear();
   bool found = false;
 
   // Could trigger deserialization of decls.
   Interpreter::PushTransactionRAII RAII(const_cast<Interpreter*>(fInterpreter));
   const Preprocessor& pp = compiler->getPreprocessor();
   for (macro_iterator macro = pp.macro_begin(); macro != pp.macro_end(); ++macro) {
-    if (macro->second->getMacroInfo()
-        && macro->second->getMacroInfo()->isObjectLike()) {
+    auto MI = macro->second.getLatest()->getMacroInfo();
+    if (MI && MI->isObjectLike()) {
       if (name == macro->first->getName().data()) {
-        DisplayObjectLikeMacro(macro->first, macro->second->getMacroInfo());
+        DisplayObjectLikeMacro(macro->first, MI);
         found = true;
       }
     }
@@ -1425,8 +1414,6 @@ void TypedefPrinter::DisplayTypedefs()const
 
   const TranslationUnitDecl* const tuDecl = compiler->getASTContext().getTranslationUnitDecl();
   assert(tuDecl != 0 && "DisplayTypedefs, translation unit is empty");
-
-  //fSeenDecls.clear();
 
   fOut.Print("List of typedefs");
   ProcessNestedDeclarations(tuDecl);

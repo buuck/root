@@ -1,16 +1,26 @@
+/// \file
+/// \ingroup tutorial_geom
+/// Misaligning geometry generate in many cases overlaps, due to the idealization
+/// of the design and the fact that in real life movements of the geometry volumes
+/// have constraints and are correlated.
+///
+/// This typically generates inconsistent
+/// response of the navigation methods, leading to inefficiencies during tracking,
+/// errors in the material budget calculations, and so on. Among those, there are
+/// dangerous cases when the hidden volumes are sensitive.
+/// This macro demonstrates how to use the "parallel world" feature to assign
+/// highest navigation priority to some physical paths in geometry.
+///
+/// \macro_image
+/// \macro_code
+///
+/// \author Andrei Gheata
+
+void align();
+
 //______________________________________________________________________________
 void parallel_world(Bool_t usepw=kTRUE, Bool_t useovlp=kTRUE)
 {
-// Misaligning geometry generate in many cases overlaps, due to the idealization
-// of the design and the fact that in real life movements of the geometry volumes
-// have constraints and are correlated. This typically generates inconsistent
-// response of the navigation methods, leading to inefficiencies during tracking,
-// errors in the material budget calculations, and so on. Among those, there are
-// dangerous cases when the hidden volumes are sensitive.
-// This macro demonstrates how to use the "parallel world" feature to assign
-// highest navigation priority to some physical paths in geometry.
-//
-
    TGeoManager *geom = new TGeoManager("parallel_world", "Showcase for prioritized physical paths");
    TGeoMaterial *matV = new TGeoMaterial("Vac", 0,0,0);
    TGeoMedium *medV = new TGeoMedium("MEDVAC",1,matV);
@@ -77,6 +87,7 @@ void parallel_world(Bool_t usepw=kTRUE, Bool_t useovlp=kTRUE)
    TView3D *view = (TView3D*)gPad->GetView();
    view->SetParallel();
    view->Side();
+   if (usepw) pw->PrintDetectedOverlaps();
 }
 
 //______________________________________________________________________________
@@ -92,6 +103,6 @@ void align()
       sag = 8.-0.494*(i-4.5)*(i-4.5);
       TGeoTranslation *tr = new TGeoTranslation(0., -225.+50.*i, 10-sag);
       node->Align(tr);
-      if (pw) pw->AddNode(node);
+      if (pw) pw->AddNode(TString::Format("/TOP_1/chip_%d",i+1));
    }
 }

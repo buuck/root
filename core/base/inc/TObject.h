@@ -13,33 +13,14 @@
 #define ROOT_TObject
 
 
-//////////////////////////////////////////////////////////////////////////
-//                                                                      //
-// TObject                                                              //
-//                                                                      //
-// Mother of all ROOT objects.                                          //
-//                                                                      //
-// The TObject class provides default behaviour and protocol for all    //
-// objects in the ROOT system. It provides protocol for object I/O,     //
-// error handling, sorting, inspection, printing, drawing, etc.         //
-// Every object which inherits from TObject can be stored in the        //
-// ROOT collection classes.                                             //
-//                                                                      //
-//////////////////////////////////////////////////////////////////////////
-
-#ifndef ROOT_Rtypes
+#include "RConfigure.h"
 #include "Rtypes.h"
-#endif
-#ifndef ROOT_TStorage
 #include "TStorage.h"
-#endif
-#ifndef ROOT_TVersionCheck
 #include "TVersionCheck.h"
-#endif
-#ifndef ROOT_Riosfwd
-#include "Riosfwd.h"
-#endif
+
 #include <stdarg.h>
+#include <string>
+#include <iosfwd>
 
 #ifdef WIN32
 #undef RemoveDirectory
@@ -56,11 +37,11 @@ class TTimer;
 class TObject {
 
 private:
-   UInt_t         fUniqueID;   //object unique identifier
-   UInt_t         fBits;       //bit field status word
+   UInt_t         fUniqueID;   ///< object unique identifier
+   UInt_t         fBits;       ///< bit field status word
 
-   static Long_t  fgDtorOnly;    //object for which to call dtor only (i.e. no delete)
-   static Bool_t  fgObjectStat;  //if true keep track of objects in TObjectTable
+   static Long_t  fgDtorOnly;    ///< object for which to call dtor only (i.e. no delete)
+   static Bool_t  fgObjectStat;  ///< if true keep track of objects in TObjectTable
 
 protected:
    void MakeZombie() { fBits |= kZombie; }
@@ -72,29 +53,29 @@ public:
    //----- in different class hierarchies (make sure there is no overlap in
    //----- any given hierarchy).
    enum EStatusBits {
-      kCanDelete        = BIT(0),   // if object in a list can be deleted
-      kMustCleanup      = BIT(3),   // if object destructor must call RecursiveRemove()
-      kObjInCanvas      = BIT(3),   // for backward compatibility only, use kMustCleanup
-      kIsReferenced     = BIT(4),   // if object is referenced by a TRef or TRefArray
-      kHasUUID          = BIT(5),   // if object has a TUUID (its fUniqueID=UUIDNumber)
-      kCannotPick       = BIT(6),   // if object in a pad cannot be picked
-      kNoContextMenu    = BIT(8),   // if object does not want context menu
-      kInvalidObject    = BIT(13)   // if object ctor succeeded but object should not be used
+      kCanDelete        = BIT(0),   ///< if object in a list can be deleted
+      kMustCleanup      = BIT(3),   ///< if object destructor must call RecursiveRemove()
+      kObjInCanvas      = BIT(3),   ///< for backward compatibility only, use kMustCleanup
+      kIsReferenced     = BIT(4),   ///< if object is referenced by a TRef or TRefArray
+      kHasUUID          = BIT(5),   ///< if object has a TUUID (its fUniqueID=UUIDNumber)
+      kCannotPick       = BIT(6),   ///< if object in a pad cannot be picked
+      kNoContextMenu    = BIT(8),   ///< if object does not want context menu
+      kInvalidObject    = BIT(13)   ///< if object ctor succeeded but object should not be used
    };
 
    //----- Private bits, clients can only test but not change them
    enum {
-      kIsOnHeap      = 0x01000000,    // object is on heap
-      kNotDeleted    = 0x02000000,    // object has not been deleted
-      kZombie        = 0x04000000,    // object ctor failed
+      kIsOnHeap      = 0x01000000,    ///< object is on heap
+      kNotDeleted    = 0x02000000,    ///< object has not been deleted
+      kZombie        = 0x04000000,    ///< object ctor failed
       kBitMask       = 0x00ffffff
    };
 
    //----- Write() options
    enum {
-      kSingleKey     = BIT(0),        // write collection with single key
-      kOverwrite     = BIT(1),        // overwrite existing object with same name
-      kWriteDelete   = BIT(2)         // write object, then delete previous key with same name
+      kSingleKey     = BIT(0),        ///< write collection with single key
+      kOverwrite     = BIT(1),        ///< overwrite existing object with same name
+      kWriteDelete   = BIT(2)         ///< write object, then delete previous key with same name
    };
 
    TObject();
@@ -154,11 +135,16 @@ public:
 
    //----- operators
    void    *operator new(size_t sz) { return TStorage::ObjectAlloc(sz); }
-   void    *operator new[](size_t sz) { return TStorage::ObjectAlloc(sz); }
+   void    *operator new[](size_t sz) { return TStorage::ObjectAllocArray(sz); }
    void    *operator new(size_t sz, void *vp) { return TStorage::ObjectAlloc(sz, vp); }
    void    *operator new[](size_t sz, void *vp) { return TStorage::ObjectAlloc(sz, vp); }
    void     operator delete(void *ptr);
    void     operator delete[](void *ptr);
+#ifdef R__SIZEDDELETE
+   // Sized deallocation.
+   void     operator delete(void*, size_t);
+   void     operator delete[](void*, size_t);
+#endif
 #ifdef R__PLACEMENTDELETE
    void     operator delete(void *ptr, void *vp);
    void     operator delete[](void *ptr, void *vp);
@@ -228,8 +214,8 @@ enum EObjBits {
    kInvalidObject    = TObject::kInvalidObject
 };
 
-#ifndef ROOT_TBuffer
-#include "TBuffer.h"
-#endif
+namespace cling {
+   std::string printValue(TObject *val);
+}
 
 #endif

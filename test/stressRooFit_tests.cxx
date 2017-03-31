@@ -938,7 +938,7 @@ public:
 
     // Build Chebychev polynomial p.d.f.
     RooRealVar a0("a0","a0",0.5,0.,1.) ;
-    RooRealVar a1("a1","a1",-0.2,0.,1.) ;
+    RooRealVar a1("a1","a1",-0.2,-1.,1.) ; 
     RooChebychev bkg("bkg","Background",x,RooArgSet(a0,a1)) ;
 
 
@@ -1065,7 +1065,7 @@ public:
 
     // Build Chebychev polynomial p.d.f.
     RooRealVar a0("a0","a0",0.5,0.,1.) ;
-    RooRealVar a1("a1","a1",-0.2,0.,1.) ;
+    RooRealVar a1("a1","a1",-0.2,-1.,1.) ; 
     RooChebychev bkg("bkg","Background",x,RooArgSet(a0,a1)) ;
 
     // Sum the signal components into a composite signal p.d.f.
@@ -1273,7 +1273,7 @@ public:
 
     // Build Chebychev polynomial p.d.f.
     RooRealVar a0("a0","a0",0.5,0.,1.) ;
-    RooRealVar a1("a1","a1",-0.2,0.,1.) ;
+    RooRealVar a1("a1","a1",-0.2,-1.,1.) ;
     RooChebychev bkg("bkg","Background",x,RooArgSet(a0,a1)) ;
 
     // Sum the signal components into a composite signal p.d.f.
@@ -1369,7 +1369,7 @@ public:
 
     // Build Chebychev polynomial p.d.f.
     RooRealVar a0("a0","a0",0.5,0.,1.) ;
-    RooRealVar a1("a1","a1",-0.2,0.,1.) ;
+    RooRealVar a1("a1","a1",-0.2,-1.,1.) ;
     RooChebychev bkg1("bkg1","Background 1",x,RooArgSet(a0,a1)) ;
 
     // Build expontential pdf
@@ -4417,7 +4417,7 @@ public:
 
   // Build Chebychev polynomial p.d.f.
   RooRealVar a0("a0","a0",0.5,0.,1.) ;
-  RooRealVar a1("a1","a1",-0.2,0.,1.) ;
+  RooRealVar a1("a1","a1",-0.2,-1.,1.) ;
   RooChebychev bkg("bkg","Background",x,RooArgSet(a0,a1)) ;
 
   // Sum the signal components into a composite signal p.d.f.
@@ -4742,28 +4742,16 @@ public:
   RooNLLVar nll("nll","nll",argus,*data) ;
 
   // Plot likelihood in m0 in range that includes problematic values
-  // In this configuration the number of errors per likelihood point
-  // evaluated for the curve is shown. A positive number in PrintEvalErrors(N)
-  // will show details for up to N events. By default the values for likelihood
-  // evaluations with errors are shown normally (unlike fitting), but the shape
-  // of the curve can be erratic in these regions.
-
-  RooPlot* frame2 = m0.frame(Range(5.288,5.293),Title("-log(L) scan vs m0")) ;
-  nll.plotOn(frame2,PrintEvalErrors(0),ShiftToZero(),LineColor(kRed),Precision(1e-4)) ;
-
-
-  // Plot likelihood in m0 in range that includes problematic values
   // In this configuration no messages are printed for likelihood evaluation errors,
   // but if an likelihood value evaluates with error, the corresponding value
   // on the curve will be set to the value given in EvalErrorValue().
 
-  RooPlot* frame3 = m0.frame(Range(5.288,5.293),Title("-log(L) scan vs m0, problematic regions masked")) ;
-  nll.plotOn(frame3,PrintEvalErrors(-1),ShiftToZero(),EvalErrorValue(nll.getVal()+10),LineColor(kRed)) ;
+  RooPlot* frame2 = m0.frame(Range(5.288,5.293),Title("-log(L) scan vs m0, problematic regions masked")) ;
+  nll.plotOn(frame2,PrintEvalErrors(-1),ShiftToZero(),EvalErrorValue(nll.getVal()+10),LineColor(kRed)) ;
 
 
   regPlot(frame1,"rf606_plot1") ;
-  regPlot(frame2,"rf606_plot2") ;
-  regPlot(frame3,"rf606_plot3") ;
+  regPlot(frame2,"rf606_plot3") ; // 3 is the reference of the plot
 
   delete data ;
   return kTRUE ;
@@ -4822,7 +4810,7 @@ public:
 
   // Build Chebychev polynomial p.d.f.
   RooRealVar a0("a0","a0",0.5,0.,1.) ;
-  RooRealVar a1("a1","a1",-0.2) ;
+  RooRealVar a1("a1","a1",-0.2,-1.,1.) ;
   RooChebychev bkg("bkg","Background",x,RooArgSet(a0,a1)) ;
 
   // Sum the signal components into a composite signal p.d.f.
@@ -6040,7 +6028,7 @@ public:
 
   // Build Chebychev polynomial p.d.f.
   RooRealVar a0("a0","a0",0.5,0.,1.) ;
-  RooRealVar a1("a1","a1",-0.2,-1,1.) ;
+  RooRealVar a1("a1","a1",-0.2,-1.,1.) ;
   RooChebychev bkg("bkg","Background",x,RooArgSet(a0,a1)) ;
 
   // Sum the signal components into a composite signal p.d.f.

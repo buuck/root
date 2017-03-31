@@ -26,12 +26,8 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TVirtualPacketizer
 #include "TVirtualPacketizer.h"
-#endif
-#ifndef ROOT_TMap
 #include "TMap.h"
-#endif
 
 
 class TMessage;
@@ -60,7 +56,6 @@ private:
    Bool_t      fFixedNum;        // Whether we must assign a fixed number of cycles per worker
 
    Long64_t    fPacketSeq;       // Sequential number of the last packet assigned
-   TList      *fInput;           // Input list
 
    TPacketizerUnit();
    TPacketizerUnit(const TPacketizerUnit&);     // no implementation, will generate

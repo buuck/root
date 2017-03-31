@@ -14,18 +14,18 @@
  * listed in LICENSE (http://roofit.sourceforge.net/license.txt)             *
  *****************************************************************************/
 
-//////////////////////////////////////////////////////////////////////////////
-//
-// BEGIN_HTML
-// RooSetPair is a utility class that stores a pair of RooArgSets
-// END_HTML
-//
+/**
+\file RooSetPair.cxx
+\class RooSetPair
+\ingroup Roofitcore
+
+RooSetPair is a utility class that stores a pair of RooArgSets
+**/
 
 #include "RooFit.h"
 
+#define ROOSETPAIR_CXX
 #include "RooSetPair.h"
-#include "RooSetPair.h"
-
 
 using namespace std;
 

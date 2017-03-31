@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef MIPSSEISELLOWERING_H
-#define MIPSSEISELLOWERING_H
+#ifndef LLVM_LIB_TARGET_MIPS_MIPSSEISELLOWERING_H
+#define LLVM_LIB_TARGET_MIPS_MIPSSEISELLOWERING_H
 
 #include "MipsISelLowering.h"
 #include "MipsRegisterInfo.h"
@@ -20,7 +20,7 @@
 namespace llvm {
   class MipsSETargetLowering : public MipsTargetLowering  {
   public:
-    explicit MipsSETargetLowering(MipsTargetMachine &TM,
+    explicit MipsSETargetLowering(const MipsTargetMachine &TM,
                                   const MipsSubtarget &STI);
 
     /// \brief Enable MSA support for the given integer type and Register
@@ -40,7 +40,7 @@ namespace llvm {
     SDValue PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const override;
 
     MachineBasicBlock *
-    EmitInstrWithCustomInserter(MachineInstr *MI,
+    EmitInstrWithCustomInserter(MachineInstr &MI,
                                 MachineBasicBlock *MBB) const override;
 
     bool isShuffleMaskLegal(const SmallVectorImpl<int> &Mask,
@@ -51,15 +51,15 @@ namespace llvm {
     const TargetRegisterClass *getRepRegClassFor(MVT VT) const override;
 
   private:
-    bool isEligibleForTailCallOptimization(const MipsCC &MipsCCInfo,
-                                     unsigned NextStackOffset,
-                                     const MipsFunctionInfo& FI) const override;
+    bool isEligibleForTailCallOptimization(
+        const CCState &CCInfo, unsigned NextStackOffset,
+        const MipsFunctionInfo &FI) const override;
 
     void
     getOpndList(SmallVectorImpl<SDValue> &Ops,
                 std::deque< std::pair<unsigned, SDValue> > &RegsToPass,
                 bool IsPICCall, bool GlobalOrExternal, bool InternalLinkage,
-                CallLoweringInfo &CLI, SDValue Callee,
+                bool IsCallReloc, CallLoweringInfo &CLI, SDValue Callee,
                 SDValue Chain) const override;
 
     SDValue lowerLOAD(SDValue Op, SelectionDAG &DAG) const;
@@ -77,41 +77,41 @@ namespace llvm {
     /// depending on the indices in the shuffle.
     SDValue lowerVECTOR_SHUFFLE(SDValue Op, SelectionDAG &DAG) const;
 
-    MachineBasicBlock *emitBPOSGE32(MachineInstr *MI,
+    MachineBasicBlock *emitBPOSGE32(MachineInstr &MI,
                                     MachineBasicBlock *BB) const;
-    MachineBasicBlock *emitMSACBranchPseudo(MachineInstr *MI,
+    MachineBasicBlock *emitMSACBranchPseudo(MachineInstr &MI,
                                             MachineBasicBlock *BB,
                                             unsigned BranchOp) const;
     /// \brief Emit the COPY_FW pseudo instruction
-    MachineBasicBlock *emitCOPY_FW(MachineInstr *MI,
+    MachineBasicBlock *emitCOPY_FW(MachineInstr &MI,
                                    MachineBasicBlock *BB) const;
     /// \brief Emit the COPY_FD pseudo instruction
-    MachineBasicBlock *emitCOPY_FD(MachineInstr *MI,
+    MachineBasicBlock *emitCOPY_FD(MachineInstr &MI,
                                    MachineBasicBlock *BB) const;
     /// \brief Emit the INSERT_FW pseudo instruction
-    MachineBasicBlock *emitINSERT_FW(MachineInstr *MI,
+    MachineBasicBlock *emitINSERT_FW(MachineInstr &MI,
                                      MachineBasicBlock *BB) const;
     /// \brief Emit the INSERT_FD pseudo instruction
-    MachineBasicBlock *emitINSERT_FD(MachineInstr *MI,
+    MachineBasicBlock *emitINSERT_FD(MachineInstr &MI,
                                      MachineBasicBlock *BB) const;
     /// \brief Emit the INSERT_([BHWD]|F[WD])_VIDX pseudo instruction
-    MachineBasicBlock *emitINSERT_DF_VIDX(MachineInstr *MI,
+    MachineBasicBlock *emitINSERT_DF_VIDX(MachineInstr &MI,
                                           MachineBasicBlock *BB,
                                           unsigned EltSizeInBytes,
                                           bool IsFP) const;
     /// \brief Emit the FILL_FW pseudo instruction
-    MachineBasicBlock *emitFILL_FW(MachineInstr *MI,
+    MachineBasicBlock *emitFILL_FW(MachineInstr &MI,
                                    MachineBasicBlock *BB) const;
     /// \brief Emit the FILL_FD pseudo instruction
-    MachineBasicBlock *emitFILL_FD(MachineInstr *MI,
+    MachineBasicBlock *emitFILL_FD(MachineInstr &MI,
                                    MachineBasicBlock *BB) const;
     /// \brief Emit the FEXP2_W_1 pseudo instructions.
-    MachineBasicBlock *emitFEXP2_W_1(MachineInstr *MI,
+    MachineBasicBlock *emitFEXP2_W_1(MachineInstr &MI,
                                      MachineBasicBlock *BB) const;
     /// \brief Emit the FEXP2_D_1 pseudo instructions.
-    MachineBasicBlock *emitFEXP2_D_1(MachineInstr *MI,
+    MachineBasicBlock *emitFEXP2_D_1(MachineInstr &MI,
                                      MachineBasicBlock *BB) const;
   };
 }
 
-#endif // MipsSEISELLOWERING_H
+#endif

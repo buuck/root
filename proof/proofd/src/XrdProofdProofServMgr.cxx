@@ -39,12 +39,13 @@
 #include "XrdProofdPriorityMgr.h"
 #include "XrdProofdProofServMgr.h"
 #include "XrdProofdProtocol.h"
-#include "XrdProofdLauncher.h"
 #include "XrdProofGroup.h"
 #include "XrdProofSched.h"
 #include "XrdROOT.h"
 
+#include <grp.h>
 #include <map>
+#include <unistd.h>
 
 // Aux structures for scan through operations
 typedef struct {
@@ -74,11 +75,12 @@ static XpdManagerCron_t fManagerCron;
 // Function run in separate thread watching changes in session status
 // frequency
 //
-//--------------------------------------------------------------------------
+////////////////////////////////////////////////////////////////////////////////
+/// This is an endless loop to check the system periodically or when
+/// triggered via a message in a dedicated pipe
+
 void *XrdProofdProofServCron(void *p)
 {
-   // This is an endless loop to check the system periodically or when
-   // triggered via a message in a dedicated pipe
    XPDLOC(SMGR, "ProofServCron")
 
    XpdManagerCron_t *mc = (XpdManagerCron_t *)p;
@@ -232,10 +234,11 @@ void *XrdProofdProofServCron(void *p)
 // Function run in a separate thread waiting for session to recover after
 // an abrupt shutdown
 //
-//--------------------------------------------------------------------------
+////////////////////////////////////////////////////////////////////////////////
+/// Waiting for session to recover after an abrupt shutdown
+
 void *XrdProofdProofServRecover(void *p)
 {
-   // Waiting for session to recover after an abrupt shutdown
    XPDLOC(SMGR, "ProofServRecover")
 
    XpdManagerCron_t *mc = (XpdManagerCron_t *)p;
@@ -261,12 +264,13 @@ void *XrdProofdProofServRecover(void *p)
    return (void *)0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Constructor
+
 XrdProofdProofServMgr::XrdProofdProofServMgr(XrdProofdManager *mgr,
                                              XrdProtocol_Config *pi, XrdSysError *e)
                       : XrdProofdConfig(pi->ConfigFN, e), fProcessSem(0)
 {
-   // Constructor
    XPDLOC(SMGR, "XrdProofdProofServMgr")
 
    fMgr = mgr;
@@ -311,11 +315,12 @@ XrdProofdProofServMgr::XrdProofdProofServMgr(XrdProofdManager *mgr,
    RegisterDirectives();
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Run configuration and parse the entered config directives.
+/// Return 0 on success, -1 on error
+
 int XrdProofdProofServMgr::Config(bool rcf)
 {
-   // Run configuration and parse the entered config directives.
-   // Return 0 on success, -1 on error
    XPDLOC(SMGR, "ProofServMgr::Config")
 
    XrdSysMutexHelper mhp(fEnvsMutex);
@@ -420,10 +425,11 @@ int XrdProofdProofServMgr::Config(bool rcf)
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Add new active session
+
 int XrdProofdProofServMgr::AddSession(XrdProofdProtocol *p, XrdProofdProofServ *s)
 {
-   // Add new active session
    XPDLOC(SMGR, "ProofServMgr::AddSession")
 
    TRACE(REQ, "adding new active session ...");
@@ -446,11 +452,12 @@ int XrdProofdProofServMgr::AddSession(XrdProofdProtocol *p, XrdProofdProofServ *
    return rc;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Checks is fpid is the path of a session UNIX socket
+/// Returns TRUE is yes; cleans the socket if the session is gone.
+
 bool XrdProofdProofServMgr::IsSessionSocket(const char *fpid)
 {
-   // Checks is fpid is the path of a session UNIX socket
-   // Returns TRUE is yes; cleans the socket if the session is gone.
    XPDLOC(SMGR, "ProofServMgr::IsSessionSocket")
 
    TRACE(REQ, "checking "<<fpid<<" ...");
@@ -485,10 +492,11 @@ bool XrdProofdProofServMgr::IsSessionSocket(const char *fpid)
    return 1;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Move session file from the active to the terminated areas
+
 int XrdProofdProofServMgr::MvSession(const char *fpid)
 {
-   // Move session file from the active to the terminated areas
    XPDLOC(SMGR, "ProofServMgr::MvSession")
 
    TRACE(REQ, "moving "<<fpid<<" ...");
@@ -537,10 +545,11 @@ int XrdProofdProofServMgr::MvSession(const char *fpid)
    return -1;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Remove session file from the terminated sessions area
+
 int XrdProofdProofServMgr::RmSession(const char *fpid)
 {
-   // Remove session file from the terminated sessions area
    XPDLOC(SMGR, "ProofServMgr::RmSession")
 
    TRACE(REQ, "removing "<<fpid<<" ...");
@@ -564,10 +573,11 @@ int XrdProofdProofServMgr::RmSession(const char *fpid)
    return -1;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Update the access time for the session pid file to the current time
+
 int XrdProofdProofServMgr::TouchSession(const char *fpid, const char *fpath)
 {
-   // Update the access time for the session pid file to the current time
    XPDLOC(SMGR, "ProofServMgr::TouchSession")
 
    TRACE(REQ, "touching "<<(fpid ? fpid : "<nul>")<<", "<<(fpath ? fpath : "<nul>")<<" ...");
@@ -592,14 +602,15 @@ int XrdProofdProofServMgr::TouchSession(const char *fpid, const char *fpath)
    return -1;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Check if the session is alive, i.e. if it has recently touched its admin file.
+/// Return 0 if alive, 1 if not-responding, -1 in case of error.
+/// The timeout for verification is 'to' if positive, else fVerifyTimeOut;
+/// the admin file is looked under 'fpath' if defined, else fActiAdminPath.
+
 int XrdProofdProofServMgr::VerifySession(const char *fpid,
                                          int to, const char *fpath)
 {
-   // Check if the session is alive, i.e. if it has recently touched its admin file.
-   // Return 0 if alive, 1 if not-responding, -1 in case of error.
-   // The timeout for verification is 'to' if positive, else fVerifyTimeOut;
-   // the admin file is looked under 'fpath' if defined, else fActiAdminPath.
    XPDLOC(SMGR, "ProofServMgr::VerifySession")
 
    // Check inputs
@@ -651,11 +662,12 @@ int XrdProofdProofServMgr::VerifySession(const char *fpid,
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Delete from the hash list the session with ID pid.
+/// Return -ENOENT if not found, or 0.
+
 int XrdProofdProofServMgr::DeleteFromSessions(const char *fpid)
 {
-   // Delete from the hash list the session with ID pid.
-   // Return -ENOENT if not found, or 0.
    XPDLOC(SMGR, "ProofServMgr::DeleteFromSessions")
 
    TRACE(REQ, "session: "<<fpid);
@@ -689,12 +701,13 @@ int XrdProofdProofServMgr::DeleteFromSessions(const char *fpid)
    return rc;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Go through the active sessions admin path and prepare reconnection of those
+/// still alive.
+/// Called at start-up.
+
 int XrdProofdProofServMgr::PrepareSessionRecovering()
 {
-   // Go through the active sessions admin path and prepare reconnection of those
-   // still alive.
-   // Called at start-up.
    XPDLOC(SMGR, "ProofServMgr::PrepareSessionRecovering")
 
    // Open dir
@@ -757,14 +770,15 @@ int XrdProofdProofServMgr::PrepareSessionRecovering()
 }
 
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Accept connections from sessions still alive. This is run in a dedicated
+/// thread.
+/// Returns -1 in case of failure, 0 if all alive sessions reconnected or the
+/// numer of sessions not reconnected if the timeout (fRecoverTimeOut per client)
+/// expired.
+
 int XrdProofdProofServMgr::RecoverActiveSessions()
 {
-   // Accept connections from sessions still alive. This is run in a dedicated
-   // thread.
-   // Returns -1 in case of failure, 0 if all alive sessions reconnected or the
-   // numer of sessions not reconnected if the timeout (fRecoverTimeOut per client)
-   // expired.
    XPDLOC(SMGR, "ProofServMgr::RecoverActiveSessions")
 
    int rc = 0;
@@ -838,13 +852,14 @@ int XrdProofdProofServMgr::RecoverActiveSessions()
    return rc;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Returns true (an the recovering deadline) if the client has sessions in
+/// recovering state; returns false otherwise.
+/// Called during for attach requests.
+
 bool XrdProofdProofServMgr::IsClientRecovering(const char *usr, const char *grp,
                                                int &deadline)
 {
-   // Returns true (an the recovering deadline) if the client has sessions in
-   // recovering state; returns false otherwise.
-   // Called during for attach requests.
    XPDLOC(SMGR, "ProofServMgr::IsClientRecovering")
 
    if (!usr || !grp) {
@@ -873,13 +888,14 @@ bool XrdProofdProofServMgr::IsClientRecovering(const char *usr, const char *grp,
    return rc;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Go through the active sessions admin path and make sure sessions are alive.
+/// If 'verify' is true also ask the session to proof that they are alive
+/// via asynchronous ping (the result will be done at next check).
+/// Move those not responding in the terminated sessions admin path.
+
 int XrdProofdProofServMgr::CheckActiveSessions(bool verify)
 {
-   // Go through the active sessions admin path and make sure sessions are alive.
-   // If 'verify' is true also ask the session to proof that they are alive
-   // via asynchronous ping (the result will be done at next check).
-   // Move those not responding in the terminated sessions admin path.
    XPDLOC(SMGR, "ProofServMgr::CheckActiveSessions")
 
    TRACE(REQ, "checking active sessions ...");
@@ -955,12 +971,13 @@ int XrdProofdProofServMgr::CheckActiveSessions(bool verify)
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Go through the terminated sessions admin path and make sure sessions they
+/// are gone.
+/// Hard-kill those still alive.
+
 int XrdProofdProofServMgr::CheckTerminatedSessions()
 {
-   // Go through the terminated sessions admin path and make sure sessions they
-   // are gone.
-   // Hard-kill those still alive.
    XPDLOC(SMGR, "ProofServMgr::CheckTerminatedSessions")
 
    TRACE(REQ, "checking terminated sessions ...");
@@ -1014,11 +1031,12 @@ int XrdProofdProofServMgr::CheckTerminatedSessions()
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Go through the sessions admin path and clean all sessions belonging to 'usr'.
+/// Move those not responding in the terminated sessions admin path.
+
 int XrdProofdProofServMgr::CleanClientSessions(const char *usr, int srvtype)
 {
-   // Go through the sessions admin path and clean all sessions belonging to 'usr'.
-   // Move those not responding in the terminated sessions admin path.
    XPDLOC(SMGR, "ProofServMgr::CleanClientSessions")
 
    TRACE(REQ, "cleaning "<<usr<<" ...");
@@ -1144,11 +1162,11 @@ int XrdProofdProofServMgr::CleanClientSessions(const char *usr, int srvtype)
    return 0;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Register directives for configuration
+
 void XrdProofdProofServMgr::RegisterDirectives()
 {
-   // Register directives for configuration
-
    // Register special config directives
    Register("proofservmgr", new XrdProofdDirective("proofservmgr", this, &DoDirectiveClass));
    Register("putenv", new XrdProofdDirective("putenv", this, &DoDirectiveClass));
@@ -1166,11 +1184,12 @@ void XrdProofdProofServMgr::RegisterDirectives()
                   new XrdProofdDirective("proofservparents", (void *)&fParentExecs, &DoDirectiveString));
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Update the priorities of the active sessions.
+
 int XrdProofdProofServMgr::DoDirective(XrdProofdDirective *d,
                                        char *val, XrdOucStream *cfg, bool rcf)
 {
-   // Update the priorities of the active sessions.
    XPDLOC(SMGR, "ProofServMgr::DoDirective")
 
    if (!d)
@@ -1190,11 +1209,12 @@ int XrdProofdProofServMgr::DoDirective(XrdProofdDirective *d,
    return -1;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Process 'proofswrvmgr' directive
+/// eg: xpd.proofswrvmgr checkfq:120 termto:100 verifyto:5 recoverto:20
+
 int XrdProofdProofServMgr::DoDirectiveProofServMgr(char *val, XrdOucStream *cfg, bool rcf)
 {
-   // Process 'proofswrvmgr' directive
-   // eg: xpd.proofswrvmgr checkfq:120 termto:100 verifyto:5 recoverto:20
    XPDLOC(SMGR, "ProofServMgr::DoDirectiveProofServMgr")
 
    if (!val || !cfg)
@@ -1259,11 +1279,11 @@ int XrdProofdProofServMgr::DoDirectiveProofServMgr(char *val, XrdOucStream *cfg,
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Process 'putenv' directives
+
 int XrdProofdProofServMgr::DoDirectivePutEnv(char *val, XrdOucStream *cfg, bool)
 {
-   // Process 'putenv' directives
-
    if (!val)
       // undefined inputs
       return -1;
@@ -1286,15 +1306,15 @@ int XrdProofdProofServMgr::DoDirectivePutEnv(char *val, XrdOucStream *cfg, bool)
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Process 'putrc' directives.
+/// Syntax:
+///    xpd.putrc  [u:<usr1>,<usr2>,...] [g:<grp1>,<grp2>,...]
+///               [s:[svnmin][-][svnmax]] [v:[vermin][-][vermax]] RcVarName RcVarValue
+/// NB: <usr1>,... and <grp1>,... may contain the wild card '*'
+
 int XrdProofdProofServMgr::DoDirectivePutRc(char *val, XrdOucStream *cfg, bool)
 {
-   // Process 'putrc' directives.
-   // Syntax:
-   //    xpd.putrc  [u:<usr1>,<usr2>,...] [g:<grp1>,<grp2>,...]
-   //               [s:[svnmin][-][svnmax]] [v:[vermin][-][vermax]] RcVarName RcVarValue
-   // NB: <usr1>,... and <grp1>,... may contain the wild card '*'
-
    if (!val || !cfg)
       // undefined inputs
       return -1;
@@ -1312,14 +1332,14 @@ int XrdProofdProofServMgr::DoDirectivePutRc(char *val, XrdOucStream *cfg, bool)
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Extract env information from the stream 'cfg'
+
 void XrdProofdProofServMgr::ExtractEnv(char *val, XrdOucStream *cfg,
                                        XrdOucString &users, XrdOucString &groups,
                                        XrdOucString &rcval, XrdOucString &rcnam,
                                        int &smi, int &smx, int &vmi, int &vmx, bool &hex)
 {
-   // Extract env information from the stream 'cfg'
-
    XrdOucString ssvn, sver;
    int idash = -1;
    while (val && val[0]) {
@@ -1368,12 +1388,13 @@ void XrdProofdProofServMgr::ExtractEnv(char *val, XrdOucStream *cfg,
    return;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Fill env entry(ies) in the relevant list
+
 void XrdProofdProofServMgr::FillEnvList(std::list<XpdEnv> *el, const char *nam, const char *val,
                                         const char *usrs, const char *grps,
                                         int smi, int smx, int vmi, int vmx, bool hex)
 {
-   // Fill env entry(ies) in the relevant list
    XPDLOC(SMGR, "ProofServMgr::FillEnvList")
 
    if (!el) {
@@ -1425,11 +1446,11 @@ void XrdProofdProofServMgr::FillEnvList(std::list<XpdEnv> *el, const char *nam, 
    return;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Process 'shutdown' directive
+
 int XrdProofdProofServMgr::DoDirectiveShutdown(char *val, XrdOucStream *cfg, bool)
 {
-   // Process 'shutdown' directive
-
    if (!val || !cfg)
       // undefined inputs
       return -1;
@@ -1477,10 +1498,11 @@ int XrdProofdProofServMgr::DoDirectiveShutdown(char *val, XrdOucStream *cfg, boo
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Process manager request
+
 int XrdProofdProofServMgr::Process(XrdProofdProtocol *p)
 {
-   // Process manager request
    XPDLOC(SMGR, "ProofServMgr::Process")
 
    int rc = 1;
@@ -1529,10 +1551,11 @@ int XrdProofdProofServMgr::Process(XrdProofdProtocol *p)
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Handle a request to attach to an existing session
+
 int XrdProofdProofServMgr::Attach(XrdProofdProtocol *p)
 {
-   // Handle a request to attach to an existing session
    XPDLOC(SMGR, "ProofServMgr::Attach")
 
    int psid = -1, rc = 0;
@@ -1621,12 +1644,13 @@ int XrdProofdProofServMgr::Attach(XrdProofdProtocol *p)
    return 0;
 }
 
-//_________________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Allocate and prepare the XrdProofdProofServ object describing this session
+
 XrdProofdProofServ *XrdProofdProofServMgr::PrepareProofServ(XrdProofdProtocol *p,
                                                             XrdProofdResponse *r,
                                                             unsigned short &sid)
 {
-   // Allocate and prepare the XrdProofdProofServ object describing this session
    XPDLOC(SMGR, "ProofServMgr::PrepareProofServ")
 
    // Allocate next free server ID and fill in the basic stuff
@@ -1661,14 +1685,15 @@ XrdProofdProofServ *XrdProofdProofServMgr::PrepareProofServ(XrdProofdProtocol *p
    return xps;
 }
 
-//_________________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Extract relevant quantities from the buffer received during a create request
+
 void XrdProofdProofServMgr::ParseCreateBuffer(XrdProofdProtocol *p,
                                               XrdProofdProofServ *xps,
                                               XrdOucString &tag, XrdOucString &ord,
                                               XrdOucString &cffile,
                                               XrdOucString &uenvs, int &intwait)
 {
-   // Extract relevant quantities from the buffer received during a create request
    XPDLOC(SMGR, "ProofServMgr::ParseCreateBuffer")
 
    // Parse buffer
@@ -1746,10 +1771,11 @@ void XrdProofdProofServMgr::ParseCreateBuffer(XrdProofdProtocol *p,
    }
 }
 
-//_________________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Handle a request to create a new session
+
 int XrdProofdProofServMgr::Create(XrdProofdProtocol *p)
 {
-   // Handle a request to create a new session
    XPDLOC(SMGR, "ProofServMgr::Create")
 
    int psid = -1, rc = 0;
@@ -2271,14 +2297,14 @@ int XrdProofdProofServMgr::Create(XrdProofdProtocol *p)
    // Over
    return 0;
 }
-//_________________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Create the admin path for the starting session
+/// Return 0 on success, -1 on error (error message in 'emsg')
+
 int XrdProofdProofServMgr::CreateAdminPath(XrdProofdProofServ *xps,
                                            XrdProofdProtocol *p, int pid,
                                            XrdOucString &emsg)
 {
-   // Create the admin path for the starting session
-   // Return 0 on success, -1 on error (error message in 'emsg')
-
    XrdOucString path;
    bool assert = (pid > 0) ? 1 : 0;
    XPDFORM(path, "%s/%s.%s.", fActiAdminPath.c_str(),
@@ -2292,13 +2318,14 @@ int XrdProofdProofServMgr::CreateAdminPath(XrdProofdProofServ *xps,
    return 0;
 }
 
-//_________________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Create the socket path for the starting session
+/// Return 0 on success, -1 on error (error message in 'emsg')
+
 int XrdProofdProofServMgr::CreateSockPath(XrdProofdProofServ *xps,
                                           XrdProofdProtocol *p,
                                           unsigned int seq, XrdOucString &emsg)
 {
-   // Create the socket path for the starting session
-   // Return 0 on success, -1 on error (error message in 'emsg')
    XPDLOC(SMGR, "ProofServMgr::CreateSockPath")
 
    XrdOucString sockpath;
@@ -2327,299 +2354,11 @@ int XrdProofdProofServMgr::CreateSockPath(XrdProofdProofServ *xps,
    return 0;
 }
 
-#if 0
-//_________________________________________________________________________________
-int XrdProofdProofServMgr::Create(XrdProofdProtocol *p)
-{
-   // Handle a request to create a new session
-   XPDLOC(SMGR, "ProofServMgr::Create")
+////////////////////////////////////////////////////////////////////////////////
+/// Send content of errlog upstream asynchronously
 
-   int psid = -1, rc = 0;
-   XPD_SETRESP(p, "Create");
-
-   // Check if we have to use the version base on Fork
-   bool forksess = (p->Client()->ROOT()->SrvProtVers() <= 32) ? 1 : 0;
-   if (fUseFork || forksess) {
-      if (!fUseFork || forksess) {
-         TRACEP(p, ALL, "PROOF version requires use of fork(): calling CreateFork()");
-      } else {
-         TRACEP(p, ALL, "use of fork() enforced: calling CreateFork()");
-      }
-      return CreateFork(p);
-   }
-
-   TRACEP(p, DBG, "enter");
-   XrdOucString msg;
-
-   XpdSrvMgrCreateGuard mcGuard;
-
-   // Check if we are allowed to start a new session
-   int mxsess = fMgr->ProofSched() ? fMgr->ProofSched()->MaxSessions() : -1;
-   if (p->ConnType() == kXPD_ClientMaster && mxsess > 0) {
-      XrdSysMutexHelper mhp(fMutex);
-      int cursess = CurrentSessions();
-      TRACEP(p,ALL," cursess: "<<cursess);
-      if (mxsess <= cursess) {
-         XPDFORM(msg, " ++++ Max number of sessions reached (%d) - please retry later ++++ \n", cursess);
-         response->Send(kXR_attn, kXPD_srvmsg, (char *) msg.c_str(), msg.length());
-         response->Send(kXP_TooManySess, "cannot start a new session");
-         return 0;
-      }
-      // If we fail this guarantees that the counters are decreased, if needed
-      mcGuard.Set(&fCurrentSessions);
-   }
-
-   // Update counter to control checks during creation
-   XpdSrvMgrCreateCnt cnt(this, kCreateCnt);
-   if (TRACING(DBG)) {
-      int nc = CheckCounter(kCreateCnt);
-      TRACEP(p, DBG, nc << " threads are creating a new session");
-   }
-
-   // Allocate and prepare the XrdProofdProofServ object describing this session
-   unsigned short sid;
-   XrdProofdProofServ *xps = PrepareProofServ(p, response, sid);
-   psid = xps->ID();
-
-   // Unmarshall log level
-   int loglevel = ntohl(p->Request()->proof.int1);
-
-   // Parse buffer
-   int intwait;
-   XrdOucString tag, ord, cffile, uenvs;
-   ParseCreateBuffer(p, xps, tag, ord, cffile, uenvs, intwait);
-
-   // Notify
-   TRACEP(p, ALL, "{ord,cfg,psid,cid,log}: {"<<ord<<","<<cffile<<","<<psid
-                                             <<","<<p->CID()<<","<<loglevel<<"}");
-
-   // Start setting up the unique tag and relevant dirs for this session
-   ProofServEnv_t in = {xps, loglevel, cffile.c_str(), "", "", tag.c_str(), "", "", 0};
-   GetTagDirs(0, p, xps, in.fSessionTag, in.fTopSessionTag, in.fSessionDir, in.fWrkDir);
-
-   XrdOucString emsg;
-
-   // The sequential number for this session
-   int seq = GetSeqSessionN();
-
-   // Admin and UNIX Socket Path (set path and create the socket); we need to
-   // set and create them in here, so that the starting process can use them
-   if (CreateSockPath(xps, p, seq, emsg) != 0) {
-      // Failure
-      TRACEP(p, XERR, emsg.c_str());
-      response->Send(kXP_ServerError, emsg.c_str());
-      return 0;
-   }
-   // The partial admin path (needed by the launcher to be finalized inside ...)
-   if (CreateAdminPath(xps, p, 0, emsg) != 0) {
-      // Failure
-      TRACEP(p, XERR, emsg.c_str());
-      response->Send(kXP_ServerError, emsg.c_str());
-      return 0;
-   }
-
-   // Create the RC-file and env-file paths for this session: for masters this will be temporarily
-   // located in the sandbox
-   XrdOucString rcfile, envfile;
-   if (p->ConnType() == kXPD_ClientMaster) {
-      XPDFORM(rcfile, "%s.rootrc", in.fSessionDir.c_str());
-      XPDFORM(envfile, "%s.env", in.fSessionDir.c_str());
-   } else {
-      const char *ndtype = (p->ConnType() == kXPD_MasterWorker) ? "worker" : "master";
-      XPDFORM(rcfile, "%s/%s-%s-%s.rootrc", in.fSessionDir.c_str(), ndtype, xps->Ordinal(), in.fSessionTag.c_str());
-      XPDFORM(envfile, "%s/%s-%s-%s.env", in.fSessionDir.c_str(), ndtype, xps->Ordinal(),  in.fSessionTag.c_str());
-   }
-
-   TRACE(ALL, "RC: "<< rcfile);
-   TRACE(ALL, "env: "<< envfile);
-   // Create the RC-file ...
-   if (CreateProofServRootRc(p, &in, rcfile.c_str()) != 0) {
-      // Failure: reset the instance
-      xps->Reset();
-      // Make sure that the log file path reaches the caller
-      XPDFORM(emsg, "Problems creating RC-file '%s'", rcfile.c_str());
-      TRACEP(p, XERR, emsg.c_str());
-      response->Send(kXP_ServerError, emsg.c_str());
-      return 0;
-   }
-   // Create the env-file ...
-   if (CreateProofServEnvFile(p, &in, envfile.c_str(), rcfile.c_str()) != 0) {
-      // Failure: reset the instance
-      xps->Reset();
-      // Remove the RC-file
-      unlink(rcfile.c_str());
-      // Make sure that the log file path reaches the caller
-      XPDFORM(emsg, "Problems creating env-file '%s'", envfile.c_str());
-      response->Send(kXP_ServerError, emsg.c_str());
-      return 0;
-   }
-
-   // Session dir, startup errors file and log prefix
-   XrdOucString sessdir, errlog, npfx;
-   if (p->ConnType() == kXPD_MasterWorker) {
-      XPDFORM(npfx, "wrk-%s:", xps->Ordinal());
-      XPDFORM(sessdir, "%s/worker-%s-%s<pid>",
-                        in.fSessionDir.c_str(), xps->Ordinal(), in.fSessionTag.c_str());
-      XPDFORM(errlog, "%s-worker-%s-%s.errlog",
-                        in.fSessionDir.c_str(), xps->Ordinal(), in.fSessionTag.c_str());
-   } else {
-      XPDFORM(npfx, "mst-%s:", xps->Ordinal());
-      if (p->ConnType() == kXPD_MasterMaster) {
-         XPDFORM(sessdir, "%s/master-%s-%s<pid>",
-                           in.fSessionDir.c_str(), xps->Ordinal(), in.fSessionTag.c_str());
-         XPDFORM(errlog, "%s/master-%s-%s.errlog",
-                           in.fSessionDir.c_str(), xps->Ordinal(), in.fSessionTag.c_str());
-      } else {
-         XPDFORM(sessdir, "%s<pid>/master-%s-%s<pid>",
-                           in.fSessionDir.c_str(), xps->Ordinal(), in.fSessionTag.c_str());
-         XPDFORM(errlog, "%s.errlog", in.fSessionDir.c_str());
-      }
-   }
-   TRACE(ALL, "sessdir: "<< sessdir);
-   TRACE(ALL, "errlog: "<< errlog);
-
-   // Launch the proofserv
-   XrdNetPeer *peersrv = 0;
-   int pid = -1;
-   int launchrc = 0;
-   ProofdLaunch_t launch_in = {fMgr, xps, loglevel, envfile, sessdir, errlog, intwait, 0};
-   if (!(peersrv = p->Client()->Launcher()->Launch(&launch_in, pid))) {
-      // Failure in creating proofserv
-      emsg = "could not create proofserv";
-      launchrc = -1;
-   } else {
-      // Launch was successful: proceed to setup the session ...
-      TRACEP(p, FORK,"Parent process: child is "<<pid);
-      // The admin path
-      if (CreateAdminPath(xps, p, pid, emsg) != 0) {
-         // Failure
-         launchrc = -1;
-      } else {
-         TRACEP(p, ALL, "admin path: " << xps->AdminPath());
-         // Finalize unique tag and relevant dirs for this session and create log file path
-         GetTagDirs((int)pid, p, xps, in.fSessionTag, in.fTopSessionTag, in.fSessionDir, in.fWrkDir);
-         XPDFORM(in.fLogFile, "%s.log", in.fWrkDir.c_str());
-         TRACEP(p, FORK, "log file: "<<in.fLogFile);
-
-         // Create or Update symlink to last session
-         TRACE(DBG, "creating symlink");
-         XrdOucString syml = p->Client()->Sandbox()->Dir();
-         if (p->ConnType() == kXPD_MasterWorker)
-            syml += "/last-worker-session";
-         else
-            syml += "/last-master-session";
-         if (XrdProofdAux::SymLink(in.fSessionDir.c_str(), syml.c_str()) != 0) {
-            XPDFORM(emsg, "problems creating symlink to last session (errno: %d)", errno);
-            launchrc = -1;
-         }
-      }
-   }
-   if (launchrc == -1) {
-      // Failure in creating proofserv
-      xps->Reset();
-      // Dump to the log file
-      TRACEP(p, XERR, emsg.c_str());
-      XrdProofdAux::LogEmsgToFile(errlog.c_str(), emsg.c_str(), npfx.c_str());
-      emsg += "|log:";
-      emsg += errlog;
-      emsg.insert(npfx, 0);
-      response->Send(kXP_ServerError, emsg.c_str());
-      SafeDel(peersrv);
-      return 0;
-   }
-
-   // Setup was successful
-   XrdOucString info;
-   if (p->ConnType() == kXPD_ClientMaster) {
-      // Send also back the data pool url
-      info = fMgr->PoolURL();
-      if (!info.endswith('/')) info += '/';
-      info += fMgr->NameSpace();
-   }
-   // The log file path (so we do it independently of a successful session startup)
-   info += "|log:";
-   info += in.fLogFile;
-   // Send it back
-   response->SendI(psid, xps->ROOT()->SrvProtVers(), (kXR_int16)XPROOFD_VERSBIN,
-                           (void *) info.c_str(), info.length());
-   // Set ID
-   xps->SetSrvPID(pid);
-
-   // Now we establish the connection ...
-   TRACEP(p, FORK, "server launched: wait for setup ...");
-
-   // Setup the protocol serving this peer
-   if (SetupProtocol(*peersrv, xps, emsg) != 0) {
-      // Send content of errlog quick access to error information
-      SendErrLog(errlog.c_str(), response);
-      emsg += "could not assert connected peer: ";
-      // Failure: kill the child process
-      if (XrdProofdAux::KillProcess(pid, 0, p->Client()->UI(), fMgr->ChangeOwn()) != 0)
-         emsg += "process could not be killed - pid: ";
-      else
-         emsg += "process killed - pid: ";
-      emsg += (int)pid;
-      // Dump to the log file
-      XrdProofdAux::LogEmsgToFile(in.fLogFile.c_str(), emsg.c_str(), npfx.c_str());
-      // Reset the instance
-      xps->Reset();
-      // Notify
-      TRACEP(p, XERR, emsg.c_str());
-      emsg.insert(npfx, 0);
-      response->Send(kXR_attn, kXPD_errmsg, (char *) emsg.c_str(), emsg.length());
-      SafeDel(peersrv);
-      return 0;
-   }
-   SafeDel(peersrv);
-   // Set the group, if any
-   xps->SetGroup(p->Client()->Group());
-
-   // Change child process priority, if required
-   int dp = 0;
-   if (fMgr->PriorityMgr()->SetProcessPriority(xps->SrvPID(),
-                                                        p->Client()->User(), dp) != 0) {
-      TRACEP(p, XERR, "problems changing child process priority");
-   } else if (dp > 0) {
-      TRACEP(p, DBG, "priority of the child process changed by " << dp << " units");
-   }
-
-   XrdClientID *cid = xps->Parent();
-   TRACEP(p, FORK, "xps: "<<xps<<", ClientID: "<<(int *)cid<<" (sid: "<<sid<<")"<<" NClients: "<<xps->GetNClients(1));
-
-   // Record this session in the client sandbox
-   if (p->Client()->Sandbox()->AddSession(xps->Tag()) == -1)
-      TRACEP(p, REQ, "problems recording session in sandbox");
-
-   // Success; avoid that the global counter is decreased
-   mcGuard.Set(0);
-
-   // Update the global session handlers
-   XrdOucString key; key += pid;
-   {  XrdSysMutexHelper mh(fMutex);
-      fSessions.Add(key.c_str(), xps, 0, Hash_keepdata);
-      fActiveSessions.push_back(xps);
-   }
-   AddSession(p, xps);
-
-   // Check session validity
-   if (!xps->IsValid()) {
-      // Notify
-      TRACEP(p, XERR, "PROOF session is invalid: protocol error? " <<emsg);
-   } else {
-      // We can remove the statup error log
-      if (unlink(errlog.c_str()) != 0)
-         TRACEP(p, XERR, "problem unlinking "<<errlog<<" - errno: "<<errno);
-   }
-
-   // Over
-   return 0;
-}
-#endif
-
-//_________________________________________________________________________________
 void XrdProofdProofServMgr::SendErrLog(const char *errlog, XrdProofdResponse *r)
 {
-   // Send content of errlog upstream asynchronously
    XPDLOC(SMGR, "ProofServMgr::SendErrLog")
 
    XrdOucString emsg("An error occured: the content of errlog follows:");
@@ -2665,10 +2404,11 @@ void XrdProofdProofServMgr::SendErrLog(const char *errlog, XrdProofdResponse *r)
    return;
 }
 
-//_________________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Handle a request to recover a session after stop&restart
+
 int XrdProofdProofServMgr::ResolveSession(const char *fpid)
 {
-   // Handle a request to recover a session after stop&restart
    XPDLOC(SMGR, "ProofServMgr::ResolveSession")
 
    TRACE(REQ,  "resolving "<< (fpid ? fpid : "<nul>")<<" ...");
@@ -2742,10 +2482,11 @@ int XrdProofdProofServMgr::ResolveSession(const char *fpid)
    return 0;
 }
 
-//_________________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Handle a request to recover a session after stop&restart for a specific client
+
 int XrdProofdProofServMgr::Recover(XpdClientSessions *cl)
 {
-   // Handle a request to recover a session after stop&restart for a specific client
    XPDLOC(SMGR, "ProofServMgr::Recover")
 
    if (!cl) {
@@ -2798,13 +2539,14 @@ int XrdProofdProofServMgr::Recover(XpdClientSessions *cl)
 }
 
 #ifndef ROOT_XrdFour
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Accept a callback from a starting-up server and setup the related protocol
+/// object. Used for old servers.
+/// Return 0 if successful or -1 in case of failure.
+
 int XrdProofdProofServMgr::AcceptPeer(XrdProofdProofServ *xps,
                                       int to, XrdOucString &msg)
 {
-   // Accept a callback from a starting-up server and setup the related protocol
-   // object. Used for old servers.
-   // Return 0 if successful or -1 in case of failure.
    XPDLOC(SMGR, "ProofServMgr::AcceptPeer")
 
    // We will get back a peer to initialize a link
@@ -2833,11 +2575,12 @@ int XrdProofdProofServMgr::AcceptPeer(XrdProofdProofServ *xps,
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Setup the protocol object serving the peer described by 'peerpsrv'
+
 int XrdProofdProofServMgr::SetupProtocol(XrdNetPeer &peerpsrv,
                                          XrdProofdProofServ *xps, XrdOucString &msg)
 {
-   // Setup the protocol object serving the peer described by 'peerpsrv'
    XPDLOC(SMGR, "ProofServMgr::SetupProtocol")
 
    // We will get back a peer to initialize a link
@@ -2911,13 +2654,14 @@ int XrdProofdProofServMgr::SetupProtocol(XrdNetPeer &peerpsrv,
 
 #else
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Accept a callback from a starting-up server and setup the related protocol
+/// object. Used for old servers.
+/// Return 0 if successful or -1 in case of failure.
+
 int XrdProofdProofServMgr::AcceptPeer(XrdProofdProofServ *xps,
                                       int to, XrdOucString &msg)
 {
-   // Accept a callback from a starting-up server and setup the related protocol
-   // object. Used for old servers.
-   // Return 0 if successful or -1 in case of failure.
    XPDLOC(SMGR, "ProofServMgr::AcceptPeer")
 
    // We will get back a peer to initialize a link
@@ -2946,11 +2690,12 @@ int XrdProofdProofServMgr::AcceptPeer(XrdProofdProofServ *xps,
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Setup the protocol object serving the peer described by 'peerpsrv'
+
 int XrdProofdProofServMgr::SetupProtocol(XrdNetAddr &netaddr,
                                          XrdProofdProofServ *xps, XrdOucString &msg)
 {
-   // Setup the protocol object serving the peer described by 'peerpsrv'
    XPDLOC(SMGR, "ProofServMgr::SetupProtocol")
 
    // We will get back a peer to initialize a link
@@ -3018,10 +2763,11 @@ int XrdProofdProofServMgr::SetupProtocol(XrdNetAddr &netaddr,
 
 #endif
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Handle a request to detach from an existing session
+
 int XrdProofdProofServMgr::Detach(XrdProofdProtocol *p)
 {
-   // Handle a request to detach from an existing session
    XPDLOC(SMGR, "ProofServMgr::Detach")
 
    int psid = -1, rc = 0;
@@ -3046,10 +2792,11 @@ int XrdProofdProofServMgr::Detach(XrdProofdProtocol *p)
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Handle a request to shutdown an existing session
+
 int XrdProofdProofServMgr::Destroy(XrdProofdProtocol *p)
 {
-   // Handle a request to shutdown an existing session
    XPDLOC(SMGR, "ProofServMgr::Destroy")
 
    int psid = -1, rc = 0;
@@ -3089,10 +2836,11 @@ int XrdProofdProofServMgr::Destroy(XrdProofdProtocol *p)
    return 0;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Run thorugh entries to broadcast the relevant priority
+
 static int WriteSessEnvs(const char *, XpdEnv *env, void *s)
 {
-   // Run thorugh entries to broadcast the relevant priority
    XPDLOC(SMGR, "WriteSessEnvs")
 
    XrdOucString emsg;
@@ -3122,11 +2870,12 @@ static int WriteSessEnvs(const char *, XpdEnv *env, void *s)
    return 1;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Set environment for proofserv; old version preparing the environment for
+/// proofserv protocol version <= 13. Needed for backward compatibility.
+
 int XrdProofdProofServMgr::SetProofServEnvOld(XrdProofdProtocol *p, void *input)
 {
-   // Set environment for proofserv; old version preparing the environment for
-   // proofserv protocol version <= 13. Needed for backward compatibility.
    XPDLOC(SMGR, "ProofServMgr::SetProofServEnvOld")
 
    char *ev = 0;
@@ -3306,13 +3055,11 @@ int XrdProofdProofServMgr::SetProofServEnvOld(XrdProofdProtocol *p, void *input)
          std::list<XpdEnv>::iterator ienvs = fProofServEnvs.begin();
          for ( ; ienvs != fProofServEnvs.end(); ienvs++) {
             int envmatch = (*ienvs).Matches(p->Client()->User(), p->Client()->Group(),
-                                            p->Client()->ROOT()->SvnRevision(),
                                             p->Client()->ROOT()->VersionCode());
             if (envmatch >= 0) {
                XpdEnv *env = sessenvs.Find((*ienvs).fName.c_str());
                if (env) {
                   int envmtcex = env->Matches(p->Client()->User(), p->Client()->Group(),
-                                              p->Client()->ROOT()->SvnRevision(),
                                               p->Client()->ROOT()->VersionCode());
                   if (envmatch > envmtcex) {
                      // Replace the entry
@@ -3383,10 +3130,11 @@ int XrdProofdProofServMgr::SetProofServEnvOld(XrdProofdProtocol *p, void *input)
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Set basic environment accordingly to 'r'
+
 int XrdProofdProofServMgr::SetProofServEnv(XrdProofdManager *mgr, XrdROOT *r)
 {
-   // Set basic environment accordingly to 'r'
    XPDLOC(SMGR, "ProofServMgr::SetProofServEnv")
 
    char *ev = 0;
@@ -3443,7 +3191,8 @@ int XrdProofdProofServMgr::SetProofServEnv(XrdProofdManager *mgr, XrdROOT *r)
    return -1;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+
 void XrdProofdProofServMgr::FormFileNameInSessionDir(XrdProofdProtocol *p,
                                                      XrdProofdProofServ *xps,
                                                      const char *sessiondir,
@@ -3473,13 +3222,14 @@ void XrdProofdProofServMgr::FormFileNameInSessionDir(XrdProofdProtocol *p,
    );
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Determine the unique tag and relevant dirs for this session
+
 void XrdProofdProofServMgr::GetTagDirs(int pid,
                                        XrdProofdProtocol *p, XrdProofdProofServ *xps,
                                        XrdOucString &sesstag, XrdOucString &topsesstag,
                                        XrdOucString &sessiondir, XrdOucString &sesswrkdir)
 {
-   // Determine the unique tag and relevant dirs for this session
    XPDLOC(SMGR, "GetTagDirs")
 
    // Client sandbox
@@ -3547,10 +3297,11 @@ void XrdProofdProofServMgr::GetTagDirs(int pid,
    return;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Run thorugh entries to broadcast the relevant priority
+
 static int WriteSessRCs(const char *, XpdEnv *erc, void *f)
 {
-   // Run thorugh entries to broadcast the relevant priority
    XPDLOC(SMGR, "WriteSessRCs")
 
    XrdOucString emsg;
@@ -3575,10 +3326,11 @@ static int WriteSessRCs(const char *, XpdEnv *erc, void *f)
    return 1;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Set environment for proofserv
+
 int XrdProofdProofServMgr::SetProofServEnv(XrdProofdProtocol *p, void *input)
 {
-   // Set environment for proofserv
    XPDLOC(SMGR, "ProofServMgr::SetProofServEnv")
 
    // Check inputs
@@ -3658,12 +3410,13 @@ int XrdProofdProofServMgr::SetProofServEnv(XrdProofdProtocol *p, void *input)
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Create in 'rcfn' the rootrc file for the proofserv being created
+/// return 0 on success, -1 on error
+
 int XrdProofdProofServMgr::CreateProofServEnvFile(XrdProofdProtocol *p, void *input,
                                                   const char *envfn, const char *rcfn)
 {
-   // Create in 'rcfn' the rootrc file for the proofserv being created
-   // return 0 on success, -1 on error
    XPDLOC(SMGR, "ProofServMgr::CreateProofServEnvFile")
 
    // Check inputs
@@ -3823,13 +3576,11 @@ int XrdProofdProofServMgr::CreateProofServEnvFile(XrdProofdProtocol *p, void *in
          std::list<XpdEnv>::iterator ienvs = fProofServEnvs.begin();
          for ( ; ienvs != fProofServEnvs.end(); ienvs++) {
             int envmatch = (*ienvs).Matches(p->Client()->User(), p->Client()->Group(),
-                                            p->Client()->ROOT()->SvnRevision(),
                                             p->Client()->ROOT()->VersionCode());
             if (envmatch >= 0) {
                XpdEnv *env = sessenvs.Find((*ienvs).fName.c_str());
                if (env) {
                   int envmtcex = env->Matches(p->Client()->User(), p->Client()->Group(),
-                                              p->Client()->ROOT()->SvnRevision(),
                                               p->Client()->ROOT()->VersionCode());
                   if (envmatch > envmtcex) {
                      // Replace the entry
@@ -3890,12 +3641,13 @@ int XrdProofdProofServMgr::CreateProofServEnvFile(XrdProofdProtocol *p, void *in
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Create in 'rcfn' the rootrc file for the proofserv being created
+/// return 0 on success, -1 on error
+
 int XrdProofdProofServMgr::CreateProofServRootRc(XrdProofdProtocol *p,
                                                  void *input, const char *rcfn)
 {
-   // Create in 'rcfn' the rootrc file for the proofserv being created
-   // return 0 on success, -1 on error
    XPDLOC(SMGR, "ProofServMgr::CreateProofServRootRc")
 
    // Check inputs
@@ -4089,13 +3841,11 @@ int XrdProofdProofServMgr::CreateProofServRootRc(XrdProofdProtocol *p,
          std::list<XpdEnv>::iterator ircs = fProofServRCs.begin();
          for ( ; ircs != fProofServRCs.end(); ircs++) {
             int rcmatch = (*ircs).Matches(p->Client()->User(), p->Client()->Group(),
-                                          p->Client()->ROOT()->SvnRevision(),
                                           p->Client()->ROOT()->VersionCode());
             if (rcmatch >= 0) {
                XpdEnv *rcenv = sessrcs.Find((*ircs).fName.c_str());
                if (rcenv) {
                   int rcmtcex = rcenv->Matches(p->Client()->User(), p->Client()->Group(),
-                                               p->Client()->ROOT()->SvnRevision(),
                                                p->Client()->ROOT()->VersionCode());
                   if (rcmatch > rcmtcex) {
                      // Replace the entry
@@ -4158,14 +3908,15 @@ int XrdProofdProofServMgr::CreateProofServRootRc(XrdProofdProtocol *p,
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Cleanup (kill) all 'proofserv' processes which lost control from their
+/// creator or controller daemon. We rely here on the information in the admin
+/// path(s) (<xrd_admin>/.xproof.<port>).
+/// This is called regurarly by the cron job to avoid having proofservs around.
+/// Return number of process killed or -1 in case of any error.
+
 int XrdProofdProofServMgr::CleanupLostProofServ()
 {
-   // Cleanup (kill) all 'proofserv' processes which lost control from their
-   // creator or controller daemon. We rely here on the information in the admin
-   // path(s) (<xrd_admin>/.xproof.<port>).
-   // This is called regurarly by the cron job to avoid having proofservs around.
-   // Return number of process killed or -1 in case of any error.
    XPDLOC(SMGR, "ProofServMgr::CleanupLostProofServ")
 
    if (!fCheckLost) {
@@ -4265,16 +4016,17 @@ int XrdProofdProofServMgr::CleanupLostProofServ()
    return nk;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Cleanup (kill) all 'proofserv' processes from the process table.
+/// Only the processes associated with 'usr' are killed,
+/// unless 'all' is TRUE, in which case all 'proofserv' instances are
+/// terminated (this requires superuser privileges).
+/// Super users can also terminated all processes fo another user (specified
+/// via usr).
+/// Return number of process notified for termination on success, -1 otherwise
+
 int XrdProofdProofServMgr::CleanupProofServ(bool all, const char *usr)
 {
-   // Cleanup (kill) all 'proofserv' processes from the process table.
-   // Only the processes associated with 'usr' are killed,
-   // unless 'all' is TRUE, in which case all 'proofserv' instances are
-   // terminated (this requires superuser privileges).
-   // Super users can also terminated all processes fo another user (specified
-   // via usr).
-   // Return number of process notified for termination on success, -1 otherwise
    XPDLOC(SMGR, "ProofServMgr::CleanupProofServ")
 
    TRACE(REQ,  "all: "<<all<<", usr: " << (usr ? usr : "undef"));
@@ -4516,14 +4268,21 @@ int XrdProofdProofServMgr::CleanupProofServ(bool all, const char *usr)
    // Build command
    XrdOucString cmd = "ps ";
    bool busr = 0;
+#if 0
+   // Left over of some previous implementation; but here fSuperUser is not defined: to be checked
    const char *cusr = (usr && strlen(usr) && fSuperUser) ? usr : fPClient->ID();
+#else
+   const char *cusr = (usr && strlen(usr)) ? usr : 0;
+#endif
    if (all) {
       cmd += "ax";
    } else {
-      cmd += "-U ";
-      cmd += cusr;
-      cmd += " -u ";
-      cmd += cusr;
+      if (cusr) {
+         cmd += "-U ";
+         cmd += cusr;
+         cmd += " -u ";
+         cmd += cusr;
+      }
       cmd += " -f";
       busr = 1;
    }
@@ -4584,12 +4343,13 @@ int XrdProofdProofServMgr::CleanupProofServ(bool all, const char *usr)
    return nk;
 }
 
-//___________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Set user ownerships on some critical files or directories.
+/// Return 0 on success, -1 if enything goes wrong.
+
 int XrdProofdProofServMgr::SetUserOwnerships(XrdProofdProtocol *p,
                                              const char *ord, const char *stag)
 {
-   // Set user ownerships on some critical files or directories.
-   // Return 0 on success, -1 if enything goes wrong.
    XPDLOC(SMGR, "ProofServMgr::SetUserOwnerships")
 
    TRACE(REQ, "enter");
@@ -4678,13 +4438,14 @@ int XrdProofdProofServMgr::SetUserOwnerships(XrdProofdProtocol *p,
    return 0;
 }
 
-//___________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Set user environment: set effective user and group ID of the process
+/// to the ones of the owner of this protocol instnace and change working
+/// dir to the sandbox.
+/// Return 0 on success, -1 if enything goes wrong.
+
 int XrdProofdProofServMgr::SetUserEnvironment(XrdProofdProtocol *p)
 {
-   // Set user environment: set effective user and group ID of the process
-   // to the ones of the owner of this protocol instnace and change working
-   // dir to the sandbox.
-   // Return 0 on success, -1 if enything goes wrong.
    XPDLOC(SMGR, "ProofServMgr::SetUserEnvironment")
 
    TRACE(REQ, "enter");
@@ -4740,19 +4501,20 @@ int XrdProofdProofServMgr::SetUserEnvironment(XrdProofdProtocol *p)
    return 0;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Return active session with process ID pid, if any.
+
 XrdProofdProofServ *XrdProofdProofServMgr::GetActiveSession(int pid)
 {
-   // Return active session with process ID pid, if any.
-
    XrdOucString key; key += pid;
    return fSessions.Find(key.c_str());
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Run thorugh entries to broadcast the relevant priority
+
 static int BroadcastPriority(const char *, XrdProofdProofServ *ps, void *s)
 {
-   // Run thorugh entries to broadcast the relevant priority
    XPDLOC(SMGR, "BroadcastPriority")
 
    XpdBroadcastPriority_t *bp = (XpdBroadcastPriority_t *)s;
@@ -4784,10 +4546,11 @@ static int BroadcastPriority(const char *, XrdProofdProofServ *ps, void *s)
    return 1;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Broadcast cluster info to the active sessions
+
 void XrdProofdProofServMgr::BroadcastClusterInfo()
 {
-   // Broadcast cluster info to the active sessions
    XPDLOC(SMGR, "ProofServMgr::BroadcastClusterInfo")
 
    TRACE(REQ, "enter");
@@ -4815,11 +4578,12 @@ void XrdProofdProofServMgr::BroadcastClusterInfo()
    }
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Broadcast priorities to the active sessions.
+/// Returns the number of sessions contacted.
+
 int XrdProofdProofServMgr::BroadcastPriorities()
 {
-   // Broadcast priorities to the active sessions.
-   // Returns the number of sessions contacted.
    XPDLOC(SMGR, "ProofServMgr::BroadcastPriorities")
 
    TRACE(REQ, "enter");
@@ -4831,13 +4595,13 @@ int XrdProofdProofServMgr::BroadcastPriorities()
    return nb;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Return true if in reconnection state, i.e. during
+/// that period during which clients are expected to reconnect.
+/// Return false if the session is fully effective
+
 bool XrdProofdProofServMgr::IsReconnecting()
 {
-   // Return true if in reconnection state, i.e. during
-   // that period during which clients are expected to reconnect.
-   // Return false if the session is fully effective
-
    int rect = -1;
    if (fReconnectTime >= 0) {
       rect = time(0) - fReconnectTime;
@@ -4848,12 +4612,12 @@ bool XrdProofdProofServMgr::IsReconnecting()
    return false;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Change reconnecting status
+///
+
 void XrdProofdProofServMgr::SetReconnectTime(bool on)
 {
-   // Change reconnecting status
-   //
-
    XrdSysMutexHelper mhp(fMutex);
 
    if (on) {
@@ -4863,12 +4627,12 @@ void XrdProofdProofServMgr::SetReconnectTime(bool on)
    }
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Check destroyed status
+///
+
 bool XrdProofdProofServMgr::Alive(XrdProofdProtocol* p)
 {
-   // Check destroyed status
-   //
-
    XrdSysMutexHelper mhp(fMutex);
 
    bool alive = true;
@@ -4887,10 +4651,11 @@ bool XrdProofdProofServMgr::Alive(XrdProofdProtocol* p)
    return alive;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Run through entries to reset the disconnecting client slots
+
 static int FreeClientID(const char *, XrdProofdProofServ *ps, void *s)
 {
-   // Run through entries to reset the disconnecting client slots
    XPDLOC(SMGR, "FreeClientID")
 
    int pid = *((int *)s);
@@ -4906,21 +4671,22 @@ static int FreeClientID(const char *, XrdProofdProofServ *ps, void *s)
    return 1;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Change reconnecting status
+///
+
 void XrdProofdProofServMgr::DisconnectFromProofServ(int pid)
 {
-   // Change reconnecting status
-   //
-
    XrdSysMutexHelper mhp(fMutex);
 
    fSessions.Apply(FreeClientID, (void *)&pid);
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Run thorugh entries to count top-masters
+
 static int CountTopMasters(const char *, XrdProofdProofServ *ps, void *s)
 {
-   // Run thorugh entries to count top-masters
    XPDLOC(SMGR, "CountTopMasters")
 
    int *ntm = (int *)s;
@@ -4939,11 +4705,11 @@ static int CountTopMasters(const char *, XrdProofdProofServ *ps, void *s)
    return 1;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Return the number of current sessions (top masters)
+
 int XrdProofdProofServMgr::CurrentSessions(bool recalculate)
 {
-   // Return the number of current sessions (top masters)
-
    XPDLOC(SMGR, "ProofServMgr::CurrentSessions")
 
    TRACE(REQ, "enter");
@@ -4958,12 +4724,12 @@ int XrdProofdProofServMgr::CurrentSessions(bool recalculate)
    return fCurrentSessions;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Resolve some keywords in 's'
+///    <logfileroot>, <user>, <rootsys>
+
 void XrdProofdProofServMgr::ResolveKeywords(XrdOucString &s, ProofServEnv_t *in)
 {
-   // Resolve some keywords in 's'
-   //    <logfileroot>, <user>, <rootsys>
-
    if (!in) return;
 
    bool isWorker = 0;
@@ -4997,11 +4763,11 @@ void XrdProofdProofServMgr::ResolveKeywords(XrdOucString &s, ProofServEnv_t *in)
 // Auxilliary class to handle session pid files
 //
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Construct from 'c' and 's'
+
 XrdProofSessionInfo::XrdProofSessionInfo(XrdProofdClient *c, XrdProofdProofServ *s)
 {
-   // Construct from 'c' and 's'
-
    fLastAccess = 0;
 
    // Fill from the client instance
@@ -5025,10 +4791,11 @@ XrdProofSessionInfo::XrdProofSessionInfo(XrdProofdClient *c, XrdProofdProofServ 
    fUnixPath = s ? s->UNIXSockPath() : "";
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Fill 's' fields using the stored info
+
 void XrdProofSessionInfo::FillProofServ(XrdProofdProofServ &s, XrdROOTMgr *rmgr)
 {
-   // Fill 's' fields using the stored info
    XPDLOC(SMGR, "SessionInfo::FillProofServ")
 
    s.SetClient(fUser.c_str());
@@ -5058,10 +4825,11 @@ void XrdProofSessionInfo::FillProofServ(XrdProofdProofServ &s, XrdROOTMgr *rmgr)
    s.SetUNIXSockPath(fUnixPath.c_str());
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Save content to 'file'
+
 int XrdProofSessionInfo::SaveToFile(const char *file)
 {
-   // Save content to 'file'
    XPDLOC(SMGR, "SessionInfo::SaveToFile")
 
    // Check inputs
@@ -5099,11 +4867,11 @@ int XrdProofSessionInfo::SaveToFile(const char *file)
    return -1;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Reset the content
+
 void XrdProofSessionInfo::Reset()
 {
-   // Reset the content
-
    fLastAccess = 0;
    fUser = "";
    fGroup = "";
@@ -5123,10 +4891,11 @@ void XrdProofSessionInfo::Reset()
    fUserEnvs = "";
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Read content from 'file'
+
 int XrdProofSessionInfo::ReadFromFile(const char *file)
 {
-   // Read content from 'file'
    XPDLOC(SMGR, "SessionInfo::ReadFromFile")
 
    Reset();
@@ -5247,13 +5016,14 @@ int XrdProofSessionInfo::ReadFromFile(const char *file)
    return 0;
 }
 
-//______________________________________________________________________________
-int XpdEnv::Matches(const char *usr, const char *grp, int svn, int ver)
+////////////////////////////////////////////////////////////////////////////////
+/// Check if this env applies to 'usr', 'grp, 'ver'.
+/// Returns -1 if it does not match, >=0 if it matches. The value is a linear
+/// combination of matching lengths for user and group, with a weight of 1000 for
+/// the users one, so that an exact user match will always win.
+
+int XpdEnv::Matches(const char *usr, const char *grp, int ver)
 {
-   // Check if this env applies to 'usr', 'grp, 'svn', 'ver'.
-   // Returns -1 if it does not match, >=0 if it matches. The value is a linear
-   // combination of matching lengths for user and group, with a weight of 1000 for
-   // the users one, so that an exact user match will always win.
    XPDLOC(SMGR, "XpdEnv::Matches")
 
    int nmtc = -1;
@@ -5277,11 +5047,6 @@ int XpdEnv::Matches(const char *usr, const char *grp, int svn, int ver)
 
    TRACE(HDBG, fEnv <<", u:"<<usr<<", g:"<<grp<<" --> nmtc: "<<nmtc);
 
-   // Check the subversion number
-   TRACE(HDBG, fEnv <<", svn:"<<svn);
-   if (fSvnMin > 0 && svn < fSvnMin) return -1;
-   if (fSvnMax > 0 && svn > fSvnMax) return -1;
-
    // Check the version code
    TRACE(HDBG, fEnv <<", ver:"<<ver);
    if (fVerMin > 0 && ver < fVerMin) return -1;
@@ -5291,12 +5056,12 @@ int XpdEnv::Matches(const char *usr, const char *grp, int svn, int ver)
    return nmtc;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Transform version number ver (format patch + 100*minor + 10000*maj, e.g. 52706)
+/// If 'hex' is true, the components are decoded as hex numbers
+
 int XpdEnv::ToVersCode(int ver, bool hex)
 {
-   // Transform version number ver (format patch + 100*minor + 10000*maj, e.g. 52706)
-   // If 'hex' is true, the components are decoded as hex numbers
-
    int maj = -1, min = -1, ptc = -1, xv = ver;
    if (hex) {
       maj = xv / 65536;
@@ -5314,10 +5079,11 @@ int XpdEnv::ToVersCode(int ver, bool hex)
    return vc;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Print the content of this env
+
 void XpdEnv::Print(const char *what)
 {
-   // Print the content of this env
    XPDLOC(SMGR, what)
 
    XrdOucString vmi("-1"), vmx("-1");

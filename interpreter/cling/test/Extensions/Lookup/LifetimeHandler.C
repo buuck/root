@@ -6,7 +6,7 @@
 // LICENSE.TXT for details.
 //------------------------------------------------------------------------------
 
-// RUN: cat %s | %cling -I%p | FileCheck %s
+// RUN: cat %s | %built_cling -I%p | FileCheck %s
 // We should revise the destruction of the LifetimeHandlers, because
 // its destructor uses gCling and the CompilerInstance, which are
 // already gone
@@ -16,8 +16,9 @@
 
 .dynamicExtensions 1
 
-cling::test::SymbolResolverCallback* SRC = new cling::test::SymbolResolverCallback(gCling);
-gCling->setCallbacks(SRC);
+std::unique_ptr<cling::test::SymbolResolverCallback> SRC;
+SRC.reset(new cling::test::SymbolResolverCallback(gCling))
+gCling->setCallbacks(std::move(SRC));
 
 .x LifetimeHandler.h
 // CHECK: Alpha's single arg ctor called {{.*Interpreter.*}}

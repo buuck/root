@@ -13,6 +13,7 @@
 
 #include "TableGenBackends.h" // Declares all backends.
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/TableGen/Error.h"
@@ -41,7 +42,9 @@ enum ActionType {
   PrintEnums,
   PrintSets,
   GenOptParserDefs,
-  GenCTags
+  GenCTags,
+  GenAttributes,
+  GenSearchableTables,
 };
 
 namespace {
@@ -85,6 +88,10 @@ namespace {
                                "Generate option definitions"),
                     clEnumValN(GenCTags, "gen-ctags",
                                "Generate ctags-compatible index"),
+                    clEnumValN(GenAttributes, "gen-attrs",
+                               "Generate attributes"),
+                    clEnumValN(GenSearchableTables, "gen-searchable-tables",
+                               "Generate generic binary-searchable table"),
                     clEnumValEnd));
 
   cl::opt<std::string>
@@ -143,9 +150,8 @@ bool LLVMTableGenMain(raw_ostream &OS, RecordKeeper &Records) {
     break;
   case PrintEnums:
   {
-    std::vector<Record*> Recs = Records.getAllDerivedDefinitions(Class);
-    for (unsigned i = 0, e = Recs.size(); i != e; ++i)
-      OS << Recs[i]->getName() << ", ";
+    for (Record *Rec : Records.getAllDerivedDefinitions(Class))
+      OS << Rec->getName() << ", ";
     OS << "\n";
     break;
   }
@@ -153,19 +159,24 @@ bool LLVMTableGenMain(raw_ostream &OS, RecordKeeper &Records) {
   {
     SetTheory Sets;
     Sets.addFieldExpander("Set", "Elements");
-    std::vector<Record*> Recs = Records.getAllDerivedDefinitions("Set");
-    for (unsigned i = 0, e = Recs.size(); i != e; ++i) {
-      OS << Recs[i]->getName() << " = [";
-      const std::vector<Record*> *Elts = Sets.expand(Recs[i]);
+    for (Record *Rec : Records.getAllDerivedDefinitions("Set")) {
+      OS << Rec->getName() << " = [";
+      const std::vector<Record*> *Elts = Sets.expand(Rec);
       assert(Elts && "Couldn't expand Set instance");
-      for (unsigned ei = 0, ee = Elts->size(); ei != ee; ++ei)
-        OS << ' ' << (*Elts)[ei]->getName();
+      for (Record *Elt : *Elts)
+        OS << ' ' << Elt->getName();
       OS << " ]\n";
     }
     break;
   }
   case GenCTags:
     EmitCTags(Records, OS);
+    break;
+  case GenAttributes:
+    EmitAttributes(Records, OS);
+    break;
+  case GenSearchableTables:
+    EmitSearchableTables(Records, OS);
     break;
   }
 
@@ -174,9 +185,11 @@ bool LLVMTableGenMain(raw_ostream &OS, RecordKeeper &Records) {
 }
 
 int main(int argc, char **argv) {
-  sys::PrintStackTraceOnErrorSignal();
+  sys::PrintStackTraceOnErrorSignal(argv[0]);
   PrettyStackTraceProgram X(argc, argv);
   cl::ParseCommandLineOptions(argc, argv);
+
+  llvm_shutdown_obj Y;
 
   return TableGenMain(argv[0], &LLVMTableGenMain);
 }

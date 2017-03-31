@@ -26,14 +26,10 @@ Classes for describing the input data for fitting
 // #include "Fit/DataVectorfwd.h"
 // #endif
 
-#ifndef ROOT_Fit_DataOptions
 #include "Fit/DataOptions.h"
-#endif
 
 
-#ifndef ROOT_Fit_DataRange
 #include "Fit/DataRange.h"
-#endif
 
 
 #include <vector>
@@ -44,6 +40,18 @@ Classes for describing the input data for fitting
 namespace ROOT {
 
    namespace Fit {
+
+
+      //class used for making shared_ptr of data classes managed by the user (i.e. when we don;t want to delete the contained object) 
+      template <class T> 
+      struct DummyDeleter
+      {
+         // a deleter not deleting the contained object
+         // used to avoid shared_ptr deleting the contained objects if managed externally
+         void operator()(T* /* p */) {
+            //printf("ROOT::Fit::DummyDeleter called - do not delete object %x \n", p);
+         }
+      };
 
 
 /**

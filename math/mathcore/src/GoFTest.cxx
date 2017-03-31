@@ -18,8 +18,12 @@
 #include <cassert>
 
 #include "Math/Error.h"
+#include "Math/Math.h"
+#include "Math/IFunction.h"
+#include "Math/IFunctionfwd.h"
 #include "Math/Integrator.h"
 #include "Math/ProbFuncMathCore.h"
+#include "Math/WrappedFunction.h"
 
 #include "Math/GoFTest.h"
 
@@ -126,8 +130,7 @@ namespace Math {
    }
 
    GoFTest::GoFTest( UInt_t sample1Size, const Double_t* sample1, UInt_t sample2Size, const Double_t* sample2 )
-   : fCDF(std::auto_ptr<IGenFunction>((IGenFunction*)0)),
-     fDist(kUndefined),
+   : fDist(kUndefined),
      fSamples(std::vector<std::vector<Double_t> >(2)),
      fTestSampleFromH0(kFALSE) {
       Bool_t badSampleArg = sample1 == 0 || sample1Size == 0;
@@ -155,8 +158,7 @@ namespace Math {
    }
 
    GoFTest::GoFTest(UInt_t sampleSize, const Double_t* sample, EDistribution dist)
-   : fCDF(std::auto_ptr<IGenFunction>((IGenFunction*)0)),
-     fDist(dist),
+   : fDist(dist),
      fSamples(std::vector<std::vector<Double_t> >(1)),
      fTestSampleFromH0(kTRUE) {
       Bool_t badSampleArg = sample == 0 || sampleSize == 0;
@@ -255,7 +257,7 @@ namespace Math {
       default:
          break;
       }
-      fCDF = std::auto_ptr<IGenFunction>(cdf);
+      fCDF.reset(cdf);
    }
 
    void GoFTest::SetDistributionFunction(const IGenFunction& f, Bool_t isPDF, Double_t xmin, Double_t xmax) {
@@ -265,9 +267,9 @@ namespace Math {
       fDist = kUserDefined;
       // function will be cloned inside the wrapper PDFIntegral of CDFWrapper classes
       if (isPDF)
-         fCDF = std::auto_ptr<IGenFunction>(new PDFIntegral(f, xmin, xmax) );
+         fCDF.reset(new PDFIntegral(f, xmin, xmax) );
       else
-         fCDF = std::auto_ptr<IGenFunction>(new CDFWrapper(f, xmin, xmax) );
+         fCDF.reset(new CDFWrapper(f, xmin, xmax) );
    }
 
    void GoFTest::Instantiate(const Double_t* sample, UInt_t sampleSize) {
@@ -279,7 +281,7 @@ namespace Math {
          MATH_ERROR_MSG("GoFTest", msg.c_str());
          assert(!badSampleArg);
       }
-      fCDF = std::auto_ptr<IGenFunction>((IGenFunction*)0);
+      fCDF.reset((IGenFunction*)0);
       fDist = kUserDefined;
       fMean = 0;
       fSigma = 0;
@@ -312,17 +314,27 @@ namespace Math {
       for (UInt_t i = 0; i < ns.size(); ++i) {
          H += 1.0 /  double( ns[i] );
       }
+
+      // use approximate formulas for large N
       // cache Sum( 1 / i)
-      std::vector<double> invI(N); 
-      for (UInt_t i = 1; i <= N - 1; ++i) {
-         invI[i] = 1.0 / i; 
-         h += invI[i]; 
-      }
-      for (UInt_t i = 1; i <= N - 2; ++i) {
-         double tmp = invI[N-i];
-         for (UInt_t j = i + 1; j <= N - 1; ++j) {
-            g += tmp * invI[j];
+      if (N < 2000) { 
+         std::vector<double> invI(N); 
+         for (UInt_t i = 1; i <= N - 1; ++i) {
+            invI[i] = 1.0 / i; 
+            h += invI[i]; 
          }
+         for (UInt_t i = 1; i <= N - 2; ++i) {
+            double tmp = invI[N-i];
+            for (UInt_t j = i + 1; j <= N - 1; ++j) {
+               g += tmp * invI[j];
+            }
+         }
+      }
+      else {
+         // for N larger than 2000 error difference in g is ~ 5 10^-3 while in h is at the level of 10^-5
+         const double emc = 0.5772156649015328606065120900824024; // Euler-Mascheroni constant
+         h = std::log(double(N-1) ) + emc;
+         g = (M_PI)*(M_PI)/6.0;
       }
       double k2 = std::pow(k,2);
       a = (4 * g - 6) * k + (10 - 6 * g) * H - 4 * g + 6;
@@ -482,147 +494,147 @@ namespace Math {
 // code from kSamples (R) F. Scholz
 
 /* computes the k-sample Anderson-Darling test statistics in both original 
-	and alternative versions for the nonparametric (rank) test described in 
-	Scholz F.W. and Stephens M.A. (1987), K-sample Anderson-Darling Tests,
-	Journal of the American Statistical Association, Vol 82, No. 399, 
-	pp. 918-924
-	
-	Arguments:
-	adk: double array with length 2, stores AkN2 and AakN2
-	k: integer, number of samples being compared
-	x: double array storing the concatenated samples in the same order as ns
-	ns: integer array storing the k sample sizes, corresponding to x
-	zstar: double array storing the l distinct ordered observations in the
-		pooled sample
-	l: integer, length of zstar
-	
-	Outputs:
-	when the computation ends, AkN2 and AakN2 are stored in the given memory
-	pointed by adk
+   and alternative versions for the nonparametric (rank) test described in
+   Scholz F.W. and Stephens M.A. (1987), K-sample Anderson-Darling Tests,
+   Journal of the American Statistical Association, Vol 82, No. 399,
+   pp. 918-924
+
+   Arguments:
+   adk: double array with length 2, stores AkN2 and AakN2
+   k: integer, number of samples being compared
+   x: double array storing the concatenated samples in the same order as ns
+   ns: integer array storing the k sample sizes, corresponding to x
+   zstar: double array storing the l distinct ordered observations in the
+      pooled sample
+   l: integer, length of zstar
+
+   Outputs:
+   when the computation ends, AkN2 and AakN2 are stored in the given memory
+   pointed by adk
 */
 
 /* counts and returns the number of occurrence of a given number 
-	in a double array */
+   in a double array */
 int getCount(double z, const double *dat, int n) {
-	int i;
-	int count = 0;
-	
-	for (i = 0; i < n; i++) {
-		if (dat[i] == z) {
-			count++;
-		}
-	}
-	
-	return(count);
+   int i;
+   int count = 0;
+
+   for (i = 0; i < n; i++) {
+      if (dat[i] == z) {
+         count++;
+      }
+   }
+
+   return(count);
 }
 
 /* computes and returns the sum of elements in a given integer array */ 
 int getSum(const int *x, int n) {
-	int i; 
-	int sum = 0; 
-	
-	for (i = 0; i < n; i++) { 
-		sum += x[i]; 
-	} 
-	
-	return(sum);
+   int i;
+   int sum = 0;
+
+   for (i = 0; i < n; i++) {
+      sum += x[i];
+   }
+
+   return(sum);
 }
 
 
-   void adkTestStat(double *adk, const std::vector<std::vector<double> > & samples, const std::vector<double> & zstar) {
+void adkTestStat(double *adk, const std::vector<std::vector<double> > & samples, const std::vector<double> & zstar) {
 
-	int i;
-	int j;
-	
-	int nsum; /* total sample size = n_1 + ... + n_k */
-        int k = samples.size();
-        int l = zstar.size(); 
-	
-	/* fij records the number of observations in the ith sample coinciding
-		with zstar[j], where i = 1, ..., k, and j = 1, ..., l */
-        std::vector<int> fij (k*l);
-	/* lvec is an integer vector with length l, 
-		whose jth entry = \sum_{i=1}^{k} f_{ij}, i.e., the multiplicity 
-		of zstar[j] */
-        std::vector<int> lvec(l);
-	
-	/* for computation */
-	double mij;
-	double maij;
-	double innerSum;
-	double aInnerSum;
-	double bj;
-	double baj;
-	double tmp;
-	
-	/* samples is a two-dimensional double array with length k;
-		it stores an array of k pointers to double arrays which are 
-		the k samples beeing compared */
-//	double **samples;
-	
-	/* dynamically allocate memory */
+   int i;
+   int j;
+
+   int nsum; /* total sample size = n_1 + ... + n_k */
+   int k = samples.size();
+   int l = zstar.size();
+
+   /* fij records the number of observations in the ith sample coinciding
+      with zstar[j], where i = 1, ..., k, and j = 1, ..., l */
+   std::vector<int> fij (k*l);
+   /* lvec is an integer vector with length l,
+      whose jth entry = \sum_{i=1}^{k} f_{ij}, i.e., the multiplicity
+      of zstar[j] */
+   std::vector<int> lvec(l);
+
+   /* for computation */
+   double mij;
+   double maij;
+   double innerSum;
+   double aInnerSum;
+   double bj;
+   double baj;
+   double tmp;
+
+   /* samples is a two-dimensional double array with length k;
+      it stores an array of k pointers to double arrays which are
+      the k samples beeing compared */
+// double **samples;
+
+   /* dynamically allocate memory */
         //std::vector< std::vector<double> > samples(k);
-        std::vector<int> ns(k);
-	nsum = 0;
-	for (i = 0; i < k; i++) {
-           ns[i] = samples[i].size(); 
-           nsum += ns[i];
-	}
-	
-	/* fij: k*l integer matrix, where l is the length of zstar and
-	 	k is the number of samples being compared 
-		lvec: integer vector of length l, records the multiplicity of 
-		each element of zstar */	
-	for (j = 0; j < l; j++) {
-		lvec[j] = 0;
-		for (i = 0; i < k; i++) {
-			fij[i + j*k] = getCount(zstar[j], &samples[i][0], ns[i]);
-			lvec[j] += fij[i + j*k];
-		}
-	}
+   std::vector<int> ns(k);
+   nsum = 0;
+   for (i = 0; i < k; i++) {
+      ns[i] = samples[i].size();
+      nsum += ns[i];
+   }
 
-        // loop on samples to compute the adk's 
-        // Formula (6) and (7) of the paper 
-	adk[0] = adk[1] = 0;
-	for (i = 0; i < k; i++) {
-		mij = 0;
-		maij = 0;
-		innerSum = 0;
-		aInnerSum = 0;
-		
-		for (j = 0; j < l; j++) {
-			mij += fij[i + j*k];
-			maij = mij - (double) fij[i + j*k] / 2.0;
-			bj = getSum(&lvec[0], j + 1);
-			baj = bj - (double) lvec[j] / 2.0;
-			
-			if (j < l - 1) {
-				tmp = (double) nsum * mij - (double) ns[i] * bj;
-				innerSum = innerSum + (double) lvec[j] * tmp * tmp / 
-									(bj * ((double) nsum - bj));
-			}
-			
-			tmp = (double) nsum * maij - (double) ns[i] * baj;
-			aInnerSum = aInnerSum + (double) lvec[j] * tmp * tmp / 
-								(baj * (nsum - baj) - nsum * (double) lvec[j] / 4.0);
-		}
-		
-		adk[0] = adk[0] + innerSum / ns[i]; /* AkN2*/
-		adk[1] = adk[1] + aInnerSum / ns[i]; /* AakN2 */
-	}
-	
-	/* k-sample Anderson-Darling test statistics in both original and 
-		alternative versions, AkN2 and AakN2, are stored in the given
-		double array adk */
-	adk[0] = adk[0] / (double) nsum; /* AkN2*/
-	adk[1] = (nsum - 1) * adk[1] / ((double) nsum * (double) nsum); /* AakN2 */
-	
-	// /* free pointers */
-	// for (i = 0; i < k; i++) {
-	// 	free(samples[i]);
-	// }
-	// free(samples);
-	
+   /* fij: k*l integer matrix, where l is the length of zstar and
+      k is the number of samples being compared
+      lvec: integer vector of length l, records the multiplicity of
+      each element of zstar */
+   for (j = 0; j < l; j++) {
+      lvec[j] = 0;
+      for (i = 0; i < k; i++) {
+         fij[i + j*k] = getCount(zstar[j], &samples[i][0], ns[i]);
+         lvec[j] += fij[i + j*k];
+      }
+   }
+
+   // loop on samples to compute the adk's
+   // Formula (6) and (7) of the paper
+   adk[0] = adk[1] = 0;
+   for (i = 0; i < k; i++) {
+      mij = 0;
+      maij = 0;
+      innerSum = 0;
+      aInnerSum = 0;
+
+      for (j = 0; j < l; j++) {
+         mij += fij[i + j*k];
+         maij = mij - (double) fij[i + j*k] / 2.0;
+         bj = getSum(&lvec[0], j + 1);
+         baj = bj - (double) lvec[j] / 2.0;
+
+         if (j < l - 1) {
+            tmp = (double) nsum * mij - (double) ns[i] * bj;
+            innerSum = innerSum + (double) lvec[j] * tmp * tmp /
+                       (bj * ((double) nsum - bj));
+         }
+
+         tmp = (double) nsum * maij - (double) ns[i] * baj;
+         aInnerSum = aInnerSum + (double) lvec[j] * tmp * tmp /
+                     (baj * (nsum - baj) - nsum * (double) lvec[j] / 4.0);
+      }
+
+      adk[0] = adk[0] + innerSum / ns[i]; /* AkN2*/
+      adk[1] = adk[1] + aInnerSum / ns[i]; /* AakN2 */
+   }
+
+   /* k-sample Anderson-Darling test statistics in both original and
+      alternative versions, AkN2 and AakN2, are stored in the given
+      double array adk */
+   adk[0] = adk[0] / (double) nsum; /* AkN2*/
+   adk[1] = (nsum - 1) * adk[1] / ((double) nsum * (double) nsum); /* AakN2 */
+
+   // /* free pointers */
+   // for (i = 0; i < k; i++) {
+   //    free(samples[i]);
+   // }
+   // free(samples);
+
 }
 
 
@@ -886,12 +898,12 @@ void GoFTest::AndersonDarling2SamplesTest(Double_t& pvalue, Double_t& testStat) 
       }
       const UInt_t na = fSamples[0].size();
       const UInt_t nb = fSamples[1].size();
-      Double_t* a = new Double_t[na];
-      Double_t* b = new Double_t[nb];
-      std::copy(fSamples[0].begin(), fSamples[0].end(), a);
-      std::copy(fSamples[1].begin(), fSamples[1].end(), b);
-      pvalue = TMath::KolmogorovTest(na, a, nb, b, 0);
-      testStat = TMath::KolmogorovTest(na, a, nb, b, "M");
+      std::vector<Double_t> a(na);
+      std::vector<Double_t> b(nb);
+      std::copy(fSamples[0].begin(), fSamples[0].end(), a.begin());
+      std::copy(fSamples[1].begin(), fSamples[1].end(), b.begin());
+      pvalue = TMath::KolmogorovTest(na, a.data(), nb, b.data(), 0);
+      testStat = TMath::KolmogorovTest(na, a.data(), nb, b.data(), "M");
    }
 
    Double_t GoFTest::KolmogorovSmirnov2SamplesTest(const Char_t* option) const {

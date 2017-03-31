@@ -12,14 +12,9 @@
 #ifndef ROOT_TOracleRow
 #define ROOT_TOracleRow
 
-#ifndef ROOT_TSQLRow
 #include "TSQLRow.h"
-#endif
 
 #if !defined(__CINT__)
-#ifndef R__WIN32
-#include <sys/time.h>
-#endif
 #include <occi.h>
 #ifdef CONST
 #undef CONST

@@ -4,21 +4,11 @@
 #ifndef ROOT_TMultiDimFit
 #define ROOT_TMultiDimFit
 
-#ifndef ROOT_TNamed
 #include "TNamed.h"
-#endif
-#ifndef ROOT_TVectorD
 #include "TVectorD.h"
-#endif
-#ifndef ROOT_TMatrixD
 #include "TMatrixD.h"
-#endif
-#ifndef ROOT_TList
 #include "TList.h"
-#endif
-#ifndef ROOT_TVirtualFitter
 #include "TVirtualFitter.h"
-#endif
 
 class TBrowser;
 
@@ -150,6 +140,7 @@ public:
    Double_t         GetChi2()              const { return fChi2; }
    const TMatrixD*  GetCorrelationMatrix() const { return &fCorrelationMatrix; }
    const TVectorD*  GetCoefficients()      const { return &fCoefficients; }
+   const TVectorD*  GetCoefficientsRMS()   const { return &fCoefficientsRMS; }
    Double_t         GetError()             const { return fError; }
    Int_t*           GetFunctionCodes()     const { return fFunctionCodes; }
    const TMatrixD*  GetFunctions()         const { return &fFunctions; }

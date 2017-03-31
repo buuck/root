@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef SPARCTARGETMACHINE_H
-#define SPARCTARGETMACHINE_H
+#ifndef LLVM_LIB_TARGET_SPARC_SPARCTARGETMACHINE_H
+#define LLVM_LIB_TARGET_SPARC_SPARCTARGETMACHINE_H
 
 #include "SparcInstrInfo.h"
 #include "SparcSubtarget.h"
@@ -21,63 +21,56 @@
 namespace llvm {
 
 class SparcTargetMachine : public LLVMTargetMachine {
+  std::unique_ptr<TargetLoweringObjectFile> TLOF;
   SparcSubtarget Subtarget;
+  bool is64Bit;
+  mutable StringMap<std::unique_ptr<SparcSubtarget>> SubtargetMap;
 public:
-  SparcTargetMachine(const Target &T, StringRef TT,
-                     StringRef CPU, StringRef FS, const TargetOptions &Options,
-                     Reloc::Model RM, CodeModel::Model CM,
+  SparcTargetMachine(const Target &T, const Triple &TT, StringRef CPU,
+                     StringRef FS, const TargetOptions &Options,
+                     Optional<Reloc::Model> RM, CodeModel::Model CM,
                      CodeGenOpt::Level OL, bool is64bit);
+  ~SparcTargetMachine() override;
 
-  const SparcInstrInfo *getInstrInfo() const override {
-    return getSubtargetImpl()->getInstrInfo();
-  }
-  const TargetFrameLowering *getFrameLowering() const override {
-    return getSubtargetImpl()->getFrameLowering();
-  }
-  const SparcSubtarget *getSubtargetImpl() const override { return &Subtarget; }
-  SparcSubtarget *getSubtargetImpl() override { return &Subtarget; }
-  const SparcRegisterInfo *getRegisterInfo() const override {
-    return getSubtargetImpl()->getRegisterInfo();
-  }
-  const SparcTargetLowering *getTargetLowering() const override {
-    return getSubtargetImpl()->getTargetLowering();
-  }
-  const SparcSelectionDAGInfo *getSelectionDAGInfo() const override {
-    return getSubtargetImpl()->getSelectionDAGInfo();
-  }
-  SparcJITInfo *getJITInfo() override {
-    return getSubtargetImpl()->getJITInfo();
-  }
-  const DataLayout *getDataLayout() const override {
-    return getSubtargetImpl()->getDataLayout();
-  }
+  const SparcSubtarget *getSubtargetImpl() const { return &Subtarget; }
+  const SparcSubtarget *getSubtargetImpl(const Function &) const override;
 
   // Pass Pipeline Configuration
   TargetPassConfig *createPassConfig(PassManagerBase &PM) override;
-  bool addCodeEmitter(PassManagerBase &PM, JITCodeEmitter &JCE) override;
+  TargetLoweringObjectFile *getObjFileLowering() const override {
+    return TLOF.get();
+  }
 };
 
-/// SparcV8TargetMachine - Sparc 32-bit target machine
+/// Sparc 32-bit target machine
 ///
 class SparcV8TargetMachine : public SparcTargetMachine {
   virtual void anchor();
 public:
-  SparcV8TargetMachine(const Target &T, StringRef TT,
-                       StringRef CPU, StringRef FS,
-                       const TargetOptions &Options,
-                       Reloc::Model RM, CodeModel::Model CM,
+  SparcV8TargetMachine(const Target &T, const Triple &TT, StringRef CPU,
+                       StringRef FS, const TargetOptions &Options,
+                       Optional<Reloc::Model> RM, CodeModel::Model CM,
                        CodeGenOpt::Level OL);
 };
 
-/// SparcV9TargetMachine - Sparc 64-bit target machine
+/// Sparc 64-bit target machine
 ///
 class SparcV9TargetMachine : public SparcTargetMachine {
   virtual void anchor();
 public:
-  SparcV9TargetMachine(const Target &T, StringRef TT,
-                       StringRef CPU, StringRef FS,
-                       const TargetOptions &Options,
-                       Reloc::Model RM, CodeModel::Model CM,
+  SparcV9TargetMachine(const Target &T, const Triple &TT, StringRef CPU,
+                       StringRef FS, const TargetOptions &Options,
+                       Optional<Reloc::Model> RM, CodeModel::Model CM,
+                       CodeGenOpt::Level OL);
+};
+
+class SparcelTargetMachine : public SparcTargetMachine {
+  virtual void anchor();
+
+public:
+  SparcelTargetMachine(const Target &T, const Triple &TT, StringRef CPU,
+                       StringRef FS, const TargetOptions &Options,
+                       Optional<Reloc::Model> RM, CodeModel::Model CM,
                        CodeGenOpt::Level OL);
 };
 

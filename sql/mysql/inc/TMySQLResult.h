@@ -12,22 +12,9 @@
 #ifndef ROOT_TMySQLResult
 #define ROOT_TMySQLResult
 
-#ifndef ROOT_TSQLResult
 #include "TSQLResult.h"
-#endif
 
-#if !defined(__CINT__)
-#ifdef R__WIN32
-#include <winsock2.h>
-#else
-#include <sys/time.h>
-#endif
 #include <mysql.h>
-#else
-struct MYSQL_RES;
-struct MYSQL_FIELD;
-#endif
-
 
 class TMySQLResult : public TSQLResult {
 

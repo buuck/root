@@ -34,17 +34,18 @@
 // Tracing
 #include "XrdProofdTrace.h"
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Constructor: validates 'dir', gets the version and defines the tag.
+
 XrdROOT::XrdROOT(const char *dir, const char *tag, const char *bindir,
                  const char *incdir, const char *libdir, const char *datadir)
 {
-   // Constructor: validates 'dir', gets the version and defines the tag.
    XPDLOC(SMGR, "XrdROOT")
 
    fStatus = -1;
    fSrvProtVers = -1;
    fRelease = "";
-   fSvnRevision = -1;
+   fGitCommit = "";
    fVersionCode = -1;
    fVrsMajor = -1;
    fVrsMinor = -1;
@@ -115,11 +116,12 @@ XrdROOT::XrdROOT(const char *dir, const char *tag, const char *bindir,
    fStatus = 0;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Check if 'dir' exists
+/// Return 0 on succes, -1 on failure
+
 int XrdROOT::CheckDir(const char *dir)
 {
-   // Check if 'dir' exists
-   // Return 0 on succes, -1 on failure
    XPDLOC(SMGR, "CheckDir")
 
    if (dir && strlen(dir) > 0) {
@@ -141,11 +143,11 @@ int XrdROOT::CheckDir(const char *dir)
    return -1;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Set valid, save protocol and finalize the export string
+
 void XrdROOT::SetValid(kXR_int16 vers)
 {
-   // Set valid, save protocol and finalize the export string
-
    fStatus = 1;
 
    if (vers > 0) {
@@ -163,10 +165,11 @@ void XrdROOT::SetValid(kXR_int16 vers)
    }
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Extract ROOT version information associated with 'dir'.
+
 int XrdROOT::ParseROOTVersionInfo()
 {
-   // Extract ROOT version information associated with 'dir'.
    XPDLOC(SMGR, "ParseROOTVersionInfo")
 
    int rc = -1;
@@ -183,7 +186,7 @@ int XrdROOT::ParseROOTVersionInfo()
 
    // Reset the related variables
    fRelease = "";
-   fSvnRevision = -1;
+   fGitCommit = "";
    fVersionCode = -1;
    fVrsMajor = -1;
    fVrsMinor = -1;
@@ -200,11 +203,12 @@ int XrdROOT::ParseROOTVersionInfo()
          pv += strlen("ROOT_RELEASE") + 1;
          fRelease = pv;
          fRelease.replace("\"","");
-      } else if ((pv = (char *) strstr(line, "ROOT_SVN_REVISION"))) {
-         if (line[strlen(line)-1] == '\n') line[strlen(line)-1] = 0;
-         pv += strlen("ROOT_SVN_REVISION");
-         while (pv[0] == ' ') pv++;
-         fSvnRevision = atoi(pv);
+      } else if (fGitCommit.length() <= 0 && (pv = (char *) strstr(line, "ROOT_GIT_COMMIT"))) {
+         if (line[strlen(line)-1] == '\n')
+            line[strlen(line)-1] = 0;
+         pv += strlen("ROOT_GIT_COMMIT") + 1;
+         fGitCommit = pv;
+         fGitCommit.replace("\"","");
       } else if ((pv = (char *) strstr(line, "ROOT_VERSION_CODE"))) {
          if (line[strlen(line)-1] == '\n') line[strlen(line)-1] = 0;
          pv += strlen("ROOT_VERSION_CODE");
@@ -229,39 +233,69 @@ int XrdROOT::ParseROOTVersionInfo()
       return rc;
    }
 
+   // Retrieve GIT commit string from dedicated file if the case
+   if (fGitCommit.length() <= 0) {
+
+      XrdOucString gitcommit = fIncDir;
+      gitcommit += "/RGitCommit.h";
+
+      // Open file
+      if ((fv = fopen(gitcommit.c_str(), "r"))) {
+
+         // Read the file
+         pv = 0;
+         while (fgets(line, sizeof(line), fv)) {
+            if (fGitCommit.length() <= 0 && (pv = (char *) strstr(line, "ROOT_GIT_COMMIT"))) {
+               if (line[strlen(line)-1] == '\n')
+                  line[strlen(line)-1] = 0;
+               pv += strlen("ROOT_GIT_COMMIT") + 1;
+               fGitCommit = pv;
+               fGitCommit.replace("\"","");
+               if (fGitCommit.length() > 0) break;
+            }
+         }
+
+         // Close the file
+         fclose(fv);
+
+      } else {
+         TRACE(REQ, "file "<<gitcommit<<" not found");
+      }
+   }
+
    // Done
    return 0;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Translate 'release' into a version code integer following the rules
+/// in $ROOTSYS/include/RVersion.h.
+/// 'release' must be in the format 'M.N/PP<something else>', e.g. 5.20/04-cms
+
 int XrdROOT::GetVersionCode(const char *release)
 {
-   // Translate 'release' into a version code integer following the rules
-   // in $ROOTSYS/include/RVersion.h.
-   // 'release' must be in the format 'M.N/PP<something else>', e.g. 5.20/04-cms
-
    int maj, min, patch;
    if (XrdROOT::ParseReleaseString(release, maj, min, patch) < 0) return -1;
    return XrdROOT::GetVersionCode(maj, min, patch);
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Translate 'release' into a version code integer following the rules
+/// in $ROOTSYS/include/RVersion.h
+
 int XrdROOT::GetVersionCode(int maj, int min, int patch)
 {
-   // Translate 'release' into a version code integer following the rules
-   // in $ROOTSYS/include/RVersion.h
-
    return ((maj << 16) + (min << 8) + patch);
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Extract from 'release' its major, minor and patch numerical components;
+/// 'release' must be in the format 'M.N/PP<something else>', e.g. 5.20/04-cms;
+/// the part <something else> is ignored.
+
 int XrdROOT::ParseReleaseString(const char *release,
                                 int &maj, int &min, int &patch)
 {
-   // Extract from 'release' its major, minor and patch numerical components;
-   // 'release' must be in the format 'M.N/PP<something else>', e.g. 5.20/04-cms;
-   // the part <something else> is ignored.
-
    if (!release || strlen(release) <= 0) return -1;
 
    XrdOucString rel(release, 7), tkn;
@@ -279,12 +313,13 @@ int XrdROOT::ParseReleaseString(const char *release,
 //
 // Manager
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Constructor
+
 XrdROOTMgr::XrdROOTMgr(XrdProofdManager *mgr,
                        XrdProtocol_Config *pi, XrdSysError *e)
           : XrdProofdConfig(pi->ConfigFN, e)
 {
-   // Constructor
    fMgr = mgr;
    fLogger = pi->eDest->logger();
    fROOT.clear();
@@ -293,10 +328,11 @@ XrdROOTMgr::XrdROOTMgr(XrdProofdManager *mgr,
    RegisterDirectives();
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Set the log dir
+
 void XrdROOTMgr::SetLogDir(const char *dir)
 {
-   // Set the log dir
    XPDLOC(SMGR, "ROOTMgr::SetLogDir")
 
    if (fMgr && dir && strlen(dir)) {
@@ -313,11 +349,12 @@ void XrdROOTMgr::SetLogDir(const char *dir)
    }
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Run configuration and parse the entered config directives.
+/// Return 0 on success, -1 on error
+
 int XrdROOTMgr::Config(bool rcf)
 {
-   // Run configuration and parse the entered config directives.
-   // Return 0 on success, -1 on error
    XPDLOC(SMGR, "ROOTMgr::Config")
 
    // Run first the configurator
@@ -347,11 +384,19 @@ int XrdROOTMgr::Config(bool rcf)
    } else {
       // Check the ROOT dirs
       if (fROOT.size() <= 0) {
+         XrdOucString dir, bd, ld, id, dd;
 #ifdef R__HAVE_CONFIG
-         XrdOucString dir(ROOTPREFIX), bd(ROOTBINDIR), ld(ROOTLIBDIR),
-                      id(ROOTINCDIR), dd(ROOTDATADIR);
-#else
-         XrdOucString dir(getenv("ROOTSYS")), bd, ld, id, dd;
+         if (getenv("ROOTIGNOREPREFIX"))
+#endif
+            dir = getenv("ROOTSYS");
+#ifdef R__HAVE_CONFIG
+         else {
+            dir = ROOTPREFIX;
+            bd = ROOTBINDIR;
+            ld = ROOTLIBDIR;
+            id = ROOTINCDIR;
+            dd = ROOTDATADIR;
+         }
 #endif
          // None defined: use ROOTSYS as default, if any; otherwise we fail
          if (dir.length() > 0) {
@@ -362,8 +407,8 @@ int XrdROOTMgr::Config(bool rcf)
                fROOT.push_back(rootc);
                TRACE(ALL, msg);
                XrdOucString mnp;
-               XPDFORM(mnp, "ROOT version details: svn: %d, code: %d, {mnp} = {%d,%d,%d}",
-                            rootc->SvnRevision(), rootc->VersionCode(), rootc->VrsMajor(),
+               XPDFORM(mnp, "ROOT version details: git: '%s', code: %d, {mnp} = {%d,%d,%d}",
+                            rootc->GitCommit(), rootc->VersionCode(), rootc->VrsMajor(),
                             rootc->VrsMinor(), rootc->VrsPatch());
                TRACE(ALL, mnp);
             } else {
@@ -382,19 +427,20 @@ int XrdROOTMgr::Config(bool rcf)
    return 0;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Register directives for configuration
+
 void XrdROOTMgr::RegisterDirectives()
 {
-   // Register directives for configuration
-
    Register("rootsys", new XrdProofdDirective("rootsys", this, &DoDirectiveClass));
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Update the priorities of the active sessions.
+
 int XrdROOTMgr::DoDirective(XrdProofdDirective *d,
                             char *val, XrdOucStream *cfg, bool rcf)
 {
-   // Update the priorities of the active sessions.
    XPDLOC(SMGR, "ROOTMgr::DoDirective")
 
    if (!d)
@@ -408,10 +454,11 @@ int XrdROOTMgr::DoDirective(XrdProofdDirective *d,
    return -1;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Process 'rootsys' directive
+
 int XrdROOTMgr::DoDirectiveRootSys(char *val, XrdOucStream *cfg, bool)
 {
-   // Process 'rootsys' directive
    XPDLOC(SMGR, "ROOTMgr::DoDirectiveRootSys")
 
    if (!val || !cfg)
@@ -454,8 +501,8 @@ int XrdROOTMgr::DoDirectiveRootSys(char *val, XrdOucStream *cfg, bool)
          if (Validate(rootc, fMgr->Sched()) == 0) {
             TRACE(REQ, "validation OK for: "<<rootc->Export());
             XrdOucString mnp;
-            XPDFORM(mnp, "version details: svn: %d, code: %d, {mnp} = {%d,%d,%d}",
-                         rootc->SvnRevision(), rootc->VersionCode(), rootc->VrsMajor(),
+            XPDFORM(mnp, "version details: git: '%s', code: %d, {mnp} = {%d,%d,%d}",
+                         rootc->GitCommit(), rootc->VersionCode(), rootc->VrsMajor(),
                          rootc->VrsMinor(), rootc->VrsPatch());
             TRACE(REQ, mnp);
             // Add to the list
@@ -469,12 +516,13 @@ int XrdROOTMgr::DoDirectiveRootSys(char *val, XrdOucStream *cfg, bool)
    return 0;
 }
 
-//__________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Start a trial server application to test forking and get the version
+/// of the protocol run by the PROOF server.
+/// Return 0 if everything goes well, -1 in case of any error.
+
 int XrdROOTMgr::Validate(XrdROOT *r, XrdScheduler *sched)
 {
-   // Start a trial server application to test forking and get the version
-   // of the protocol run by the PROOF server.
-   // Return 0 if everything goes well, -1 in case of any error.
    XPDLOC(SMGR, "ROOTMgr::Validate")
 
    TRACE(REQ, "forking test and protocol retrieval");
@@ -659,12 +707,12 @@ int XrdROOTMgr::Validate(XrdROOT *r, XrdScheduler *sched)
    return 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Return a string describing the available versions, with the default
+/// version 'def' markde with a '*'
+
 XrdOucString XrdROOTMgr::ExportVersions(XrdROOT *def)
 {
-   // Return a string describing the available versions, with the default
-   // version 'def' markde with a '*'
-
    XrdOucString out;
 
    // Generic info about all known sessions
@@ -683,12 +731,12 @@ XrdOucString XrdROOTMgr::ExportVersions(XrdROOT *def)
    return out;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Return pointer to the ROOT version corresponding to 'tag'
+/// or 0 if not found.
+
 XrdROOT *XrdROOTMgr::GetVersion(const char *tag)
 {
-   // Return pointer to the ROOT version corresponding to 'tag'
-   // or 0 if not found.
-
    XrdROOT *r = 0;
 
    std::list<XrdROOT *>::iterator ip;

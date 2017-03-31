@@ -14,12 +14,13 @@
  * listed in LICENSE (http://roofit.sourceforge.net/license.txt)             *
  *****************************************************************************/
 
-//////////////////////////////////////////////////////////////////////////////
-// 
-// BEGIN_HTML
-// Class RooComplex is a simple container class for complex values
-// END_HTML
-//
+/**
+\file RooComplex.cxx
+\class RooComplex
+\ingroup Roofitcore
+
+Class RooComplex is a simple container class for complex values
+**/
 
 #include "RooFit.h"
 
@@ -41,9 +42,10 @@ void RooComplex::warn() const
     }
 }
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+///  WVE Solaric CC5.0 complains about this
+
 void RooComplex::Print() const {
-//  WVE Solaric CC5.0 complains about this
   cout << *this << endl;
 }
 

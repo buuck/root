@@ -14,18 +14,19 @@
  * listed in LICENSE (http://roofit.sourceforge.net/license.txt)             *
  *****************************************************************************/
 
-//////////////////////////////////////////////////////////////////////////////
-//
-// BEGIN_HTML
-// RooFormula an implementation of TFormula that interfaces it to RooAbsArg
-// value objects. It allows to use the value of a given list of RooAbsArg objects in the formula
-// expression. Reference is done either by the RooAbsArgs name
-// or by list ordinal postion ('@0,@1,...'). State information
-// of RooAbsCategories can be accessed used the '::' operator,
-// e.g. 'tagCat::Kaon' will resolve to the numerical value of
-// the 'Kaon' state of the RooAbsCategory object named tagCat.
-// END_HTML
-//
+/**
+\file RooFormula.cxx
+\class RooFormula
+\ingroup Roofitcore
+
+RooFormula an implementation of ROOT::v5::TFormula that interfaces it to RooAbsArg
+value objects. It allows to use the value of a given list of RooAbsArg objects in the formula
+expression. Reference is done either by the RooAbsArgs name
+or by list ordinal postion ('@0,@1,...'). State information
+of RooAbsCategories can be accessed used the '::' operator,
+e.g. 'tagCat::Kaon' will resolve to the numerical value of
+the 'Kaon' state of the RooAbsCategory object named tagCat.
+**/
 
 #include "RooFit.h"
 
@@ -40,26 +41,28 @@
 #include "RooAbsCategory.h"
 #include "RooArgList.h"
 #include "RooMsgService.h"
+#include "RooTrace.h"
 
 using namespace std;
 
 ClassImp(RooFormula)
 
 
-//_____________________________________________________________________________
-RooFormula::RooFormula() : TFormula(), _nset(0)
+////////////////////////////////////////////////////////////////////////////////
+/// Default constructor
+/// coverity[UNINIT_CTOR]
+
+RooFormula::RooFormula() : ROOT::v5::TFormula(), _nset(0)
 {
-  // Default constructor
-  // coverity[UNINIT_CTOR]
 }
 
 
-//_____________________________________________________________________________
-RooFormula::RooFormula(const char* name, const char* formula, const RooArgList& list) : 
-  TFormula(), _isOK(kTRUE), _compiled(kFALSE)
-{
-  // Constructor with expression string and list of RooAbsArg variables
+////////////////////////////////////////////////////////////////////////////////
+/// Constructor with expression string and list of RooAbsArg variables
 
+RooFormula::RooFormula(const char* name, const char* formula, const RooArgList& list) : 
+  ROOT::v5::TFormula(), _isOK(kTRUE), _compiled(kFALSE)
+{
   SetName(name) ;
   SetTitle(formula) ;
 
@@ -80,12 +83,12 @@ RooFormula::RooFormula(const char* name, const char* formula, const RooArgList& 
 
 
 
-//_____________________________________________________________________________
-RooFormula::RooFormula(const RooFormula& other, const char* name) : 
-  TFormula(), RooPrintable(other), _isOK(other._isOK), _compiled(kFALSE) 
-{
-  // Copy constructor
+////////////////////////////////////////////////////////////////////////////////
+/// Copy constructor
 
+RooFormula::RooFormula(const RooFormula& other, const char* name) : 
+  ROOT::v5::TFormula(), RooPrintable(other), _isOK(other._isOK), _compiled(kFALSE) 
+{
   SetName(name?name:other.GetName()) ;
   SetTitle(other.GetTitle()) ;
 
@@ -102,11 +105,11 @@ RooFormula::RooFormula(const RooFormula& other, const char* name) :
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Recompile formula with new expression
+
 Bool_t RooFormula::reCompile(const char* newFormula) 
 {
-  // Recompile formula with new expression
-
   fNval=0 ;
   _useList.Clear() ;  
 
@@ -123,21 +126,21 @@ Bool_t RooFormula::reCompile(const char* newFormula)
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Destructor
+
 RooFormula::~RooFormula() 
 {
-  // Destructor
-
   _labelList.Delete() ;
 }
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Return list of RooAbsArg dependents that is actually used by formula expression
+
 RooArgSet& RooFormula::actualDependents() const
 {
-  // Return list of RooAbsArg dependents that is actually used by formula expression
-
   if (!_compiled) {
     _isOK = !((RooFormula*)this)->Compile() ;
     _compiled = kTRUE ;
@@ -157,11 +160,11 @@ RooArgSet& RooFormula::actualDependents() const
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// DEBUG: Dump state information
+
 void RooFormula::dump() 
 {
-  // DEBUG: Dump state information
-
   int i ;
   cout << "RooFormula::dump()" << endl ;
   cout << "useList:" << endl ;
@@ -180,13 +183,13 @@ void RooFormula::dump()
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Change used variables to those with the same name in given list
+/// If mustReplaceAll is true and error is generated if one of the
+/// elements of newDeps is not found as a server
+
 Bool_t RooFormula::changeDependents(const RooAbsCollection& newDeps, Bool_t mustReplaceAll, Bool_t nameChange) 
 {
-  // Change used variables to those with the same name in given list
-  // If mustReplaceAll is true and error is generated if one of the
-  // elements of newDeps is not found as a server
-  
   //Change current servers to new servers with the same name given in list
   Bool_t errorStat(kFALSE) ;
   int i ;
@@ -208,6 +211,11 @@ Bool_t RooFormula::changeDependents(const RooAbsCollection& newDeps, Bool_t must
     RooAbsReal* replace = (RooAbsReal*) arg->findNewServer(newDeps,nameChange) ;
     if (replace) {
       _origList.Replace(arg,replace) ;
+      if (arg->getStringAttribute("origName")) {
+	replace->setStringAttribute("origName",arg->getStringAttribute("origName")) ;
+      } else {
+	replace->setStringAttribute("origName",arg->GetName()) ;
+      }
     } else if (mustReplaceAll) {
       errorStat = kTRUE ;
     }
@@ -219,12 +227,12 @@ Bool_t RooFormula::changeDependents(const RooAbsCollection& newDeps, Bool_t must
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Evaluate ROOT::v5::TFormula using given normalization set to be used as
+/// observables definition passed to RooAbsReal::getVal()
+
 Double_t RooFormula::eval(const RooArgSet* nset)
 { 
-  // Evaluate TFormula using given normalization set to be used as
-  // observables definition passed to RooAbsReal::getVal()
-
   if (!_compiled) {
     _isOK = !Compile() ;
     _compiled = kTRUE ;
@@ -245,12 +253,12 @@ Double_t RooFormula::eval(const RooArgSet* nset)
 
 Double_t
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Interface to ROOT::v5::TFormula, return value defined by object with id 'code'
+/// Object ids are mapped from object names by method DefinedVariable()
+
 RooFormula::DefinedValue(Int_t code) 
 {
-  // Interface to TFormula, return value defined by object with id 'code'
-  // Object ids are mapped from object names by method DefinedVariable()
-
   // Return current value for variable indicated by internal reference code
   if (code>=_useList.GetSize()) return 0 ;
 
@@ -279,13 +287,13 @@ RooFormula::DefinedValue(Int_t code)
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Interface to ROOT::v5::TFormula. If name passed by ROOT::v5::TFormula is recognized
+/// as one of our RooAbsArg servers, return a unique id integer
+/// that represent this variable.
+
 Int_t RooFormula::DefinedVariable(TString &name, int& action)
 {
-  // Interface to TFormula. If name passed by TFormula is recognized
-  // as one of our RooAbsArg servers, return a unique id integer
-  // that represent this variable.
-
   Int_t ret = DefinedVariable(name) ;
   if (ret>=0) {
 
@@ -301,13 +309,13 @@ Int_t RooFormula::DefinedVariable(TString &name, int& action)
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Interface to ROOT::v5::TFormula. If name passed by ROOT::v5::TFormula is recognized
+/// as one of our RooAbsArg servers, return a unique id integer
+/// that represent this variable.
+
 Int_t RooFormula::DefinedVariable(TString &name) 
 {
-  // Interface to TFormula. If name passed by TFormula is recognized
-  // as one of our RooAbsArg servers, return a unique id integer
-  // that represent this variable.
-
   char argName[1024];
   strlcpy(argName,name.Data(),1024) ;
 
@@ -333,6 +341,13 @@ Int_t RooFormula::DefinedVariable(TString &name)
   } else {
     // Access by name
     arg= (RooAbsArg*) _origList.FindObject(argName) ;
+    if (!arg) {
+      for (RooLinkedListIter it = _origList.iterator(); RooAbsArg* v = dynamic_cast<RooAbsArg*>(it.Next());) {
+	if (!TString(argName).CompareTo(v->getStringAttribute("origName"))) {
+	  arg= v ;
+	}
+      }
+    }
   }
 
   // Check that arg exists
@@ -360,7 +375,8 @@ Int_t RooFormula::DefinedVariable(TString &name)
   Int_t i ;
   for(i=0 ; i<_useList.GetSize() ; i++) {
     RooAbsArg* var = (RooAbsArg*) _useList.At(i) ;
-    Bool_t varMatch = !TString(var->GetName()).CompareTo(arg->GetName()) ;
+    //Bool_t varMatch = !TString(var->GetName()).CompareTo(arg->GetName()) ;
+    Bool_t varMatch = !TString(var->GetName()).CompareTo(arg->GetName()) && !TString(var->getStringAttribute("origName")).CompareTo(arg->GetName());
 
     if (varMatch) {
       TString& lbl= ((TObjString*) _labelList.At(i))->String() ;
@@ -392,11 +408,11 @@ Int_t RooFormula::DefinedVariable(TString &name)
 
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Printing interface
+
 void RooFormula::printMultiline(ostream& os, Int_t /*contents*/, Bool_t /*verbose*/, TString indent) const 
 {
-  // Printing interface
-
   os << indent << "--- RooFormula ---" << endl;
   os << indent << "  Formula: \"" << GetTitle() << "\"" << endl;
   indent.Append("  ");
@@ -404,46 +420,46 @@ void RooFormula::printMultiline(ostream& os, Int_t /*contents*/, Bool_t /*verbos
 }
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Print value of formula
+
 void RooFormula::printValue(ostream& os) const 
 {
-  // Print value of formula
-
   os << const_cast<RooFormula*>(this)->eval(0) ;
 }
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Print name of formula
+
 void RooFormula::printName(ostream& os) const 
 {
-  // Print name of formula
-
   os << GetName() ;
 }
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Print title of formula
+
 void RooFormula::printTitle(ostream& os) const 
 {
-  // Print title of formula
-
   os << GetTitle() ;
 }
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Print class name of formula
+
 void RooFormula::printClassName(ostream& os) const 
 {
-  // Print class name of formula
-
   os << IsA()->GetName() ;
 }
 
 
-//_____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Print arguments of formula, i.e. dependents that are actually used
+
 void RooFormula::printArgs(ostream& os) const 
 {
-  // Print arguments of formula, i.e. dependents that are actually used
-
   os << "[ actualVars=" << _actual << " ]" ;
 }

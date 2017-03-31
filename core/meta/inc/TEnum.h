@@ -20,20 +20,10 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TNamed
 #include "TNamed.h"
-#endif
-#ifndef ROOT_THashList
 #include "THashList.h"
-#endif
-#ifndef ROOT_TString
 #include "TString.h"
-#endif
-#ifndef ROOT_TDictionary
 #include "TDictionary.h"
-#endif
-
-#include <typeinfo>
 
 class TClass;
 class TEnumConstant;
@@ -54,7 +44,7 @@ public:
                        kALoadAndInterpLookup = 3
                       };
 
-   TEnum(): fInfo(0) {}
+   TEnum(): fInfo(0), fClass(0) {}
    TEnum(const char *name, void *info, TClass *cls);
    virtual ~TEnum();
 

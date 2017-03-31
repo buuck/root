@@ -1,56 +1,23 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<!--  this file used by THttpServer to display single element -->
+<!DOCTYPE html>
+<html lang="en">
    <head>
+      <meta charset="UTF-8">
+      <meta http-equiv="X-UA-Compatible" content="IE=edge">
       <title>Draw of single element</title>
-      <!--  this file used by THttpServer to display single element -->
-      <meta http-equiv="X-UA-Compatible" content="IE=Edge; text/html">
-      <script type="text/javascript" src="/jsrootsys/scripts/JSRootCore.js"></script>
+      <script type="text/javascript" src="jsrootsys/scripts/JSRootCore.js?gui"></script>
    </head>
 
    <script type='text/javascript'>
 
-      function CreateDrawGui() {
-         // analyze URL options
-         var drawopt = JSROOT.GetUrlOption("opt");
+      function GetCachedHierarchy() { return "$$$h.json$$$"; }
 
-         var monitor = JSROOT.GetUrlOption("monitoring");
-         if (monitor == "") monitor = 3000; else
-         if (monitor != null) monitor = parseInt(monitor);
-
-         var objpainter = null;
-
-         function drawfunction() {
-
-            var req = JSROOT.NewHttpRequest("root.json.gz?compact=3", 'text', function(result) {
-                var obj = JSROOT.parse(result);
-                if (!obj) {
-                   if (!objpainter) $('#drawing').append("<h3>Can not get object from the server</h3>");
-                   return;
-                }
-
-                document.body.style.cursor = 'wait';
-                objpainter = JSROOT.redraw('drawing', obj, drawopt);
-                document.body.style.cursor = 'auto';
-
-            });
-
-            // submit request
-            req.send(null);
-         }
-
-         drawfunction();
-
-         if (monitor!=null)
-            setInterval(drawfunction, monitor);
-
-         JSROOT.RegisterForResize(function() { if (objpainter) objpainter.CheckResize(); });
-      }
+      function GetCachedObject() { return "$$$root.json$$$"; }
 
    </script>
 
-   <body onload="JSROOT.AssertPrerequisites('2d', CreateDrawGui, 'drawing')">
-      <div id="drawing" style="position:absolute; left:1px; top:1px; bottom:1px; right:1px">
+   <body>
+      <div id="drawGUI">
          loading scripts...
       </div>
    </body>

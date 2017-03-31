@@ -25,11 +25,12 @@ namespace LangAS {
 /// This uses a high starting offset so as not to conflict with any address
 /// space used by a target.
 enum ID {
-  Offset = 0xFFFF00,
+  Offset = 0x7FFF00,
 
   opencl_global = Offset,
   opencl_local,
   opencl_constant,
+  opencl_generic,
 
   cuda_device,
   cuda_constant,

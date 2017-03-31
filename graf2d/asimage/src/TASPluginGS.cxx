@@ -9,12 +9,11 @@
  * For the list of contributors see $ROOTSYS/README/CREDITS.             *
  *************************************************************************/
 
-//////////////////////////////////////////////////////////////////////////
-//                                                                      //
-// TASPluginGS - allows to read PS/EPS/PDF files via GhostScript        //
-//                                                                      //
-//                                                                      //
-//////////////////////////////////////////////////////////////////////////
+/** \class TASPluginGS
+\ingroup asimage
+
+Allows to read PS/EPS/PDF files via GhostScript
+*/
 
 #include "TASPluginGS.h"
 #include "TSystem.h"
@@ -45,12 +44,11 @@ extern "C" {
 
 ClassImp(TASPluginGS)
 
+////////////////////////////////////////////////////////////////////////////////
+/// ctor
 
-//______________________________________________________________________________
 TASPluginGS::TASPluginGS(const char *ext) : TASImagePlugin(ext)
 {
-   // ctor
-
 #ifndef WIN32
    fInterpreter = gSystem->Which(gSystem->Getenv("PATH"), "gs", kExecutePermission);
 #else
@@ -63,20 +61,20 @@ TASPluginGS::TASPluginGS(const char *ext) : TASImagePlugin(ext)
 #endif
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// dtor
+
 TASPluginGS::~TASPluginGS()
 {
-   // dtor
-
    delete [] fInterpreter;
    fInterpreter = 0;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// read PS/EPS/PDF file and convert it to ASImage
+
 ASImage *TASPluginGS::File2ASImage(const char *filename)
 {
-   // read PS/EPS/PDF file and convert it to ASImage
-
    if (!fInterpreter) {
       Warning("File2ASImage", "GhostScript is not available");
       return 0;

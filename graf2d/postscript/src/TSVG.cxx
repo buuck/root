@@ -31,52 +31,51 @@
 
 ClassImp(TSVG)
 
+/** \class TSVG
+\ingroup PS
 
-//______________________________________________________________________________
-/*Begin_Html
-<center><h2>TSVG: Graphics interface to SVG</h2></center>
-<a href="http://www.w3.org/Graphics/SVG/Overview.htm8"><b>SVG</b></a>
-(Scalable Vector Graphics) is a language for describing two-dimensional
-graphics in XML. <b>SVG</b> allows high quality vector graphics in
+Interface to SVG
+
+[SVG](http://www.w3.org/Graphics/SVG/Overview.htm8)
+(Scalable Vector Graphics) is a language for describing
+two-dimensional graphics in XML. SVG allows high quality vector graphics in
 HTML pages.
-<p>
-To print a ROOT canvas "c1" into an <b>SVG</b> file simply do:
-<PRE>
-   c1->Print("c1.svg");
-</PRE>
-The result is the ASCII file <tt>c1.svg</tt>.
-<p>
-It can be open direclty using a web browser or included in a html document
+
+To print a ROOT canvas "c1" into an SVG file simply do:
+~~~ {.cpp}
+     c1->Print("c1.svg");
+~~~
+The result is the ASCII file `c1.svg`.
+
+It can be open directly using a web browser or included in a html document
 the following way:
-<pre>
-&lt;embed width="95%" height="500" src="c1.svg" /&gt;>
-</pre>
+~~~ {.cpp}
+<embed width="95%" height="500" src="c1.svg">
+~~~
 It is best viewed with Internet Explorer and you need the
-<a href="http://www.adobe.com/svg/viewer/install/main.html">Adobe <b>SVG</b>
-Viewer</a>.
-<p>
-To zoom using the Adobe <b>SVG</b> Viewer, position the mouse over
+[Adobe SVG Viewer](http://www.adobe.com/svg/viewer/install/main.html)
+
+To zoom using the Adobe SVG Viewer, position the mouse over
 the area you want to zoom and click the right button.
-<p>
+
 To define the zoom area,
 use Control+drag to mark the boundaries of the zoom area.
-<p>
+
 To pan, use Alt+drag.
-By clicking with the right mouse button on the <b>SVG</b> graphics you will get
+By clicking with the right mouse button on the SVG graphics you will get
 a pop-up menu giving other ways to interact with the image.
-<p>
-<b>SVG</b> files can be used directly in compressed mode to minimize the time
-transfer over the network. Compressed <b>SVG</b> files should be created using
-<tt>gzip</tt> on a normal ASCII <b>SVG</b> file and should then be renamed
-using the file extension <tt>.svgz</tt>.
-End_Html */
 
+SVG files can be used directly in compressed mode to minimize the time
+transfer over the network. Compressed SVG files should be created using
+`gzip` on a normal ASCII SVG file and should then be renamed
+using the file extension `.svgz`.
+*/
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Default SVG constructor
+
 TSVG::TSVG() : TVirtualPS()
 {
-   // Default SVG constructor
-
    fStream      = 0;
    fType        = 0;
    gVirtualPS   = this;
@@ -88,29 +87,27 @@ TSVG::TSVG() : TVirtualPS()
    SetTitle("SVG");
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Initialize the SVG interface
+///
+///  - fname : SVG file name
+///  - wtype : SVG workstation type. Not used in the SVG driver. But as TSVG
+///            inherits from TVirtualPS it should be kept. Anyway it is not
+///            necessary to specify this parameter at creation time because it
+///            has a default value (which is ignore in the SVG case).
 
-//______________________________________________________________________________
 TSVG::TSVG(const char *fname, Int_t wtype) : TVirtualPS(fname, wtype)
 {
-   // Initialize the SVG interface
-   //
-   //  fname : SVG file name
-   //  wtype : SVG workstation type. Not used in the SVG driver. But as TSVG
-   //          inherits from TVirtualPS it should be kept. Anyway it is not
-   //          necessary to specify this parameter at creation time because it
-   //          has a default value (which is ignore in the SVG case).
-
    fStream = 0;
    SetTitle("SVG");
    Open(fname, wtype);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Open a SVG file
 
-//______________________________________________________________________________
 void TSVG::Open(const char *fname, Int_t wtype)
 {
-   // Open a SVG file
-
    if (fStream) {
       Warning("Open", "SVG file already open");
       return;
@@ -154,20 +151,19 @@ void TSVG::Open(const char *fname, Int_t wtype)
    NewPage();
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Default SVG destructor
 
-//______________________________________________________________________________
 TSVG::~TSVG()
 {
-   // Default SVG destructor
-
    Close();
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Close a SVG file
 
-//______________________________________________________________________________
 void TSVG::Close(Option_t *)
 {
-   // Close a SVG file
    if (!gVirtualPS) return;
    if (!fStream) return;
    if (gPad) gPad->Update();
@@ -179,12 +175,11 @@ void TSVG::Close(Option_t *)
    gVirtualPS = 0;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Activate an already open SVG file
 
-//______________________________________________________________________________
 void TSVG::On()
 {
-   // Activate an already open SVG file
-
    // fType is used to know if the SVG file is open. Unlike TPostScript, TSVG
    // has no "workstation type". In fact there is only one SVG type.
 
@@ -196,26 +191,24 @@ void TSVG::On()
    gVirtualPS = this;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Deactivate an already open SVG file
 
-//______________________________________________________________________________
 void TSVG::Off()
 {
-   // Deactivate an already open SVG file
-
    gVirtualPS = 0;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Draw a Box
 
-//______________________________________________________________________________
 void TSVG::DrawBox(Double_t x1, Double_t y1, Double_t x2, Double_t  y2)
 {
-   // Draw a Box
-
    static Double_t x[4], y[4];
-   Int_t ix1 = XtoSVG(x1);
-   Int_t ix2 = XtoSVG(x2);
-   Int_t iy1 = YtoSVG(y1);
-   Int_t iy2 = YtoSVG(y2);
+   Double_t ix1 = XtoSVG(TMath::Min(x1,x2));
+   Double_t ix2 = XtoSVG(TMath::Max(x1,x2));
+   Double_t iy1 = YtoSVG(TMath::Min(y1,y2));
+   Double_t iy2 = YtoSVG(TMath::Max(y1,y2));
    Int_t fillis = fFillStyle/1000;
    Int_t fillsi = fFillStyle%1000;
 
@@ -237,13 +230,13 @@ void TSVG::DrawBox(Double_t x1, Double_t y1, Double_t x2, Double_t  y2)
       if (fillsi == -3) {
          PrintStr("@");
          PrintFast(9,"<rect x=\"");
-         WriteInteger(ix1, kFALSE);
+         WriteReal(ix1, kFALSE);
          PrintFast(5,"\" y=\"");
-         WriteInteger(iy2, kFALSE);
+         WriteReal(iy2, kFALSE);
          PrintFast(9,"\" width=\"");
-         WriteInteger(ix2-ix1, kFALSE);
+         WriteReal(ix2-ix1, kFALSE);
          PrintFast(10,"\" height=\"");
-         WriteInteger(iy1-iy2, kFALSE);
+         WriteReal(iy1-iy2, kFALSE);
          PrintFast(7,"\" fill=");
          SetColor(5);
          PrintFast(2,"/>");
@@ -252,48 +245,50 @@ void TSVG::DrawBox(Double_t x1, Double_t y1, Double_t x2, Double_t  y2)
    if (fillis == 1) {
       PrintStr("@");
       PrintFast(9,"<rect x=\"");
-      WriteInteger(ix1, kFALSE);
+      WriteReal(ix1, kFALSE);
       PrintFast(5,"\" y=\"");
-      WriteInteger(iy2, kFALSE);
+      WriteReal(iy2, kFALSE);
       PrintFast(9,"\" width=\"");
-      WriteInteger(ix2-ix1, kFALSE);
+      WriteReal(ix2-ix1, kFALSE);
       PrintFast(10,"\" height=\"");
-      WriteInteger(iy1-iy2, kFALSE);
+      WriteReal(iy1-iy2, kFALSE);
       PrintFast(7,"\" fill=");
       SetColor(fFillColor);
       PrintFast(2,"/>");
    }
    if (fillis == 0) {
+      if (fLineWidth<=0) return;
       PrintStr("@");
       PrintFast(9,"<rect x=\"");
-      WriteInteger(ix1, kFALSE);
+      WriteReal(ix1, kFALSE);
       PrintFast(5,"\" y=\"");
-      WriteInteger(iy2, kFALSE);
+      WriteReal(iy2, kFALSE);
       PrintFast(9,"\" width=\"");
-      WriteInteger(ix2-ix1, kFALSE);
+      WriteReal(ix2-ix1, kFALSE);
       PrintFast(10,"\" height=\"");
-      WriteInteger(iy1-iy2, kFALSE);
+      WriteReal(iy1-iy2, kFALSE);
       PrintFast(21,"\" fill=\"none\" stroke=");
       SetColor(fLineColor);
       PrintFast(2,"/>");
    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Draw a Frame around a box
+///
+///  - mode = -1  the box looks as it is behind the screen
+///  - mode =  1  the box looks as it is in front of the screen
+///  - border is the border size in already pre-computed SVG units dark is the
+///    color for the dark part of the frame light is the color for the light
+///    part of the frame
 
-//______________________________________________________________________________
 void TSVG::DrawFrame(Double_t xl, Double_t yl, Double_t xt, Double_t  yt,
                             Int_t mode, Int_t border, Int_t dark, Int_t light)
 {
-   // Draw a Frame around a box
-   //
-   // mode = -1  the box looks as it is behind the screen
-   // mode =  1  the box looks as it is in front of the screen
-   // border is the border size in already pre-computed SVG units dark is the
-   // color for the dark part of the frame light is the color for the light
-   // part of the frame
-
-   static Int_t xps[7], yps[7];
-   Int_t i, ixd0, iyd0, idx, idy, ixdi, iydi, ix, iy;
+   static Double_t xps[7], yps[7];
+   Int_t i;
+   Double_t ixd0, iyd0, ixdi, iydi, ix, iy;
+   Int_t idx, idy;
 
    //- Draw top&left part of the box
 
@@ -309,9 +304,9 @@ void TSVG::DrawFrame(Double_t xl, Double_t yl, Double_t xt, Double_t  yt,
    iyd0 = yps[0];
    PrintStr("@");
    PrintFast(10,"<path d=\"M");
-   WriteInteger(ixd0, kFALSE);
+   WriteReal(ixd0, kFALSE);
    PrintFast(1,",");
-   WriteInteger(iyd0, kFALSE);
+   WriteReal(iyd0, kFALSE);
 
    idx = 0;
    idy = 0;
@@ -373,9 +368,9 @@ void TSVG::DrawFrame(Double_t xl, Double_t yl, Double_t xt, Double_t  yt,
    iyd0 = yps[0];
    PrintStr("@");
    PrintFast(10,"<path d=\"M");
-   WriteInteger(ixd0, kFALSE);
+   WriteReal(ixd0, kFALSE);
    PrintFast(1,",");
-   WriteInteger(iyd0, kFALSE);
+   WriteReal(iyd0, kFALSE);
 
    idx = 0;
    idy = 0;
@@ -425,20 +420,20 @@ void TSVG::DrawFrame(Double_t xl, Double_t yl, Double_t xt, Double_t  yt,
    PrintFast(2,"/>");
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Draw a PolyLine
+///
+///  Draw a polyline through  the points  xy.
+///  - If NN=1 moves only to point x,y.
+///  - If NN=0 the x,y are  written  in the SVG        file
+///       according to the current transformation.
+///  - If NN>0 the line is clipped as a line.
+///  - If NN<0 the line is clipped as a fill area.
 
-//______________________________________________________________________________
 void TSVG::DrawPolyLine(Int_t nn, TPoints *xy)
 {
-   // Draw a PolyLine
-   //
-   //  Draw a polyline through  the points  xy.
-   //  If NN=1 moves only to point x,y.
-   //  If NN=0 the x,y are  written  in the SVG        file
-   //     according to the current transformation.
-   //  If NN>0 the line is clipped as a line.
-   //  If NN<0 the line is clipped as a fill area.
-
-   Int_t  n, ixd0, iyd0, idx, idy, ixdi, iydi, ix, iy;
+   Int_t  n, idx, idy;
+   Double_t ixd0, iyd0, ixdi, iydi, ix, iy;
 
    if (nn > 0) {
       n = nn;
@@ -448,10 +443,7 @@ void TSVG::DrawPolyLine(Int_t nn, TPoints *xy)
 
    ixd0 = XtoSVG(xy[0].GetX());
    iyd0 = YtoSVG(xy[0].GetY());
-   if( n <= 1) {
-      if( n == 0) return;
-      return;
-   }
+   if( n <= 1) return;
 
    PrintFast(2," m");
    idx = 0;
@@ -499,20 +491,20 @@ void TSVG::DrawPolyLine(Int_t nn, TPoints *xy)
    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Draw a PolyLine in NDC space
+///
+///  Draw a polyline through  the points  xy.
+///  --If NN=1 moves only to point x,y.
+///  --If NN=0 the x,y are  written  in the SVG        file
+///       according to the current transformation.
+///  --If NN>0 the line is clipped as a line.
+///  - If NN<0 the line is clipped as a fill area.
 
-//______________________________________________________________________________
 void TSVG::DrawPolyLineNDC(Int_t nn, TPoints *xy)
 {
-   // Draw a PolyLine in NDC space
-   //
-   //  Draw a polyline through  the points  xy.
-   //  If NN=1 moves only to point x,y.
-   //  If NN=0 the x,y are  written  in the SVG        file
-   //     according to the current transformation.
-   //  If NN>0 the line is clipped as a line.
-   //  If NN<0 the line is clipped as a fill area.
-
-   Int_t  n, ixd0, iyd0, idx, idy, ixdi, iydi, ix, iy;
+   Int_t  n, idx, idy;
+   Double_t ixd0, iyd0, ixdi, iydi, ix, iy;
 
    if (nn > 0) {
       n = nn;
@@ -522,10 +514,7 @@ void TSVG::DrawPolyLineNDC(Int_t nn, TPoints *xy)
 
    ixd0 = UtoSVG(xy[0].GetX());
    iyd0 = VtoSVG(xy[0].GetY());
-   if( n <= 1) {
-      if( n == 0) return;
-      return;
-   }
+   if( n <= 1) return;
 
    idx = 0;
    idy = 0;
@@ -573,12 +562,11 @@ void TSVG::DrawPolyLineNDC(Int_t nn, TPoints *xy)
    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Paint PolyMarker
 
-//______________________________________________________________________________
 void TSVG::DrawPolyMarker(Int_t n, Float_t *xw, Float_t *yw)
 {
-   // Paint PolyMarker
-
    Int_t ms = abs(fMarkerStyle);
 
    if (ms >= 6 && ms <= 19) ms = 20;
@@ -606,7 +594,7 @@ void TSVG::DrawPolyMarker(Int_t n, Float_t *xw, Float_t *yw)
       PrintStr("<g stroke=");
       SetColor(Int_t(fMarkerColor));
       PrintStr(" stroke-width=\"");
-      WriteInteger(fLineWidth, kFALSE);
+      WriteReal(fLineWidth, kFALSE);
       PrintStr("\" fill=");
       SetColor(Int_t(fMarkerColor));
       PrintStr(">");
@@ -614,7 +602,7 @@ void TSVG::DrawPolyMarker(Int_t n, Float_t *xw, Float_t *yw)
       PrintStr("<g stroke=");
       SetColor(Int_t(fMarkerColor));
       PrintStr(" stroke-width=\"");
-      WriteInteger(fLineWidth, kFALSE);
+      WriteReal(fLineWidth, kFALSE);
       PrintStr("\" fill=\"none\"");
       PrintStr(">");
    }
@@ -626,13 +614,13 @@ void TSVG::DrawPolyMarker(Int_t n, Float_t *xw, Float_t *yw)
       // Dot (.)
       if (ms == 1) {
          PrintStr("<line x1=\"");
-         WriteInteger(int(ix-1), kFALSE);
+         WriteReal(ix-1, kFALSE);
          PrintStr("\" y1=\"");
-         WriteInteger(int(iy), kFALSE);
+         WriteReal(iy, kFALSE);
          PrintStr("\" x2=\"");
-         WriteInteger(int(ix), kFALSE);
+         WriteReal(ix, kFALSE);
          PrintStr("\" y2=\"");
-         WriteInteger(int(iy), kFALSE);
+         WriteReal(iy, kFALSE);
          PrintStr("\"/>");
       // Plus (+)
       } else if (ms == 2) {
@@ -793,13 +781,13 @@ void TSVG::DrawPolyMarker(Int_t n, Float_t *xw, Float_t *yw)
          PrintStr("\"/>");
       } else {
          PrintStr("<line x1=\"");
-         WriteInteger(int(ix-1), kFALSE);
+         WriteReal(ix-1, kFALSE);
          PrintStr("\" y1=\"");
-         WriteInteger(int(iy), kFALSE);
+         WriteReal(iy, kFALSE);
          PrintStr("\" x2=\"");
-         WriteInteger(int(ix), kFALSE);
+         WriteReal(ix, kFALSE);
          PrintStr("\" y2=\"");
-         WriteInteger(int(iy), kFALSE);
+         WriteReal(iy, kFALSE);
          PrintStr("\"/>");
       }
    }
@@ -807,12 +795,11 @@ void TSVG::DrawPolyMarker(Int_t n, Float_t *xw, Float_t *yw)
    PrintStr("</g>");
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Paint PolyMarker
 
-//______________________________________________________________________________
 void TSVG::DrawPolyMarker(Int_t n, Double_t *xw, Double_t *yw)
 {
-   // Paint PolyMarker
-
    Int_t ms = abs(fMarkerStyle);
 
    if (ms >= 6 && ms <= 19) ms = 20;
@@ -840,7 +827,7 @@ void TSVG::DrawPolyMarker(Int_t n, Double_t *xw, Double_t *yw)
       PrintStr("<g stroke=");
       SetColor(Int_t(fMarkerColor));
       PrintStr(" stroke-width=\"");
-      WriteInteger(fLineWidth, kFALSE);
+      WriteReal(fLineWidth, kFALSE);
       PrintStr("\" fill=");
       SetColor(Int_t(fMarkerColor));
       PrintStr(">");
@@ -848,7 +835,7 @@ void TSVG::DrawPolyMarker(Int_t n, Double_t *xw, Double_t *yw)
       PrintStr("<g stroke=");
       SetColor(Int_t(fMarkerColor));
       PrintStr(" stroke-width=\"");
-      WriteInteger(fLineWidth, kFALSE);
+      WriteReal(fLineWidth, kFALSE);
       PrintStr("\" fill=\"none\"");
       PrintStr(">");
    }
@@ -860,13 +847,13 @@ void TSVG::DrawPolyMarker(Int_t n, Double_t *xw, Double_t *yw)
       // Dot (.)
       if (ms == 1) {
          PrintStr("<line x1=\"");
-         WriteInteger(int(ix-1), kFALSE);
+         WriteReal(ix-1, kFALSE);
          PrintStr("\" y1=\"");
-         WriteInteger(int(iy), kFALSE);
+         WriteReal(iy, kFALSE);
          PrintStr("\" x2=\"");
-         WriteInteger(int(ix), kFALSE);
+         WriteReal(ix, kFALSE);
          PrintStr("\" y2=\"");
-         WriteInteger(int(iy), kFALSE);
+         WriteReal(iy, kFALSE);
          PrintStr("\"/>");
       // Plus (+)
       } else if (ms == 2) {
@@ -1025,13 +1012,13 @@ void TSVG::DrawPolyMarker(Int_t n, Double_t *xw, Double_t *yw)
          PrintStr("\"/>");
       } else {
          PrintStr("<line x1=\"");
-         WriteInteger(int(ix-1), kFALSE);
+         WriteReal(ix-1, kFALSE);
          PrintStr("\" y1=\"");
-         WriteInteger(int(iy), kFALSE);
+         WriteReal(iy, kFALSE);
          PrintStr("\" x2=\"");
-         WriteInteger(int(ix), kFALSE);
+         WriteReal(ix, kFALSE);
          PrintStr("\" y2=\"");
-         WriteInteger(int(iy), kFALSE);
+         WriteReal(iy, kFALSE);
          PrintStr("\"/>");
       }
    }
@@ -1039,20 +1026,21 @@ void TSVG::DrawPolyMarker(Int_t n, Double_t *xw, Double_t *yw)
    PrintStr("</g>");
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// This function defines a path with xw and yw and draw it according the
+/// value of nn:
+///
+///  - If nn>0 a line is drawn.
+///  - If nn<0 a closed polygon is drawn.
 
-//______________________________________________________________________________
 void TSVG::DrawPS(Int_t nn, Double_t *xw, Double_t *yw)
 {
-   // This function defines a path with xw and yw and draw it according the
-   // value of nn:
-   //
-   //  If nn>0 a line is drawn.
-   //  If nn<0 a closed polygon is drawn.
-
-   Int_t  n, ixd0, iyd0, idx, idy, ixdi, iydi, ix, iy, fais, fasi;
+   Int_t  n, fais, fasi;
+   Double_t ixd0, iyd0, idx, idy, ixdi, iydi, ix, iy;
    fais = fasi = 0;
 
    if (nn > 0) {
+      if (fLineWidth<=0) return;
       n = nn;
    } else {
       n = -nn;
@@ -1077,9 +1065,9 @@ void TSVG::DrawPS(Int_t nn, Double_t *xw, Double_t *yw)
 
    PrintStr("@");
    PrintFast(10,"<path d=\"M");
-   WriteInteger(ixd0, kFALSE);
+   WriteReal(ixd0, kFALSE);
    PrintFast(1,",");
-   WriteInteger(iyd0, kFALSE);
+   WriteReal(iyd0, kFALSE);
 
    idx = idy = 0;
    for (Int_t i=1;i<n;i++) {
@@ -1114,7 +1102,7 @@ void TSVG::DrawPS(Int_t nn, Double_t *xw, Double_t *yw)
       SetColor(fLineColor);
       if(fLineWidth > 1.) {
          PrintFast(15," stroke-width=\"");
-         WriteInteger(Int_t(fLineWidth), kFALSE);
+         WriteReal(fLineWidth, kFALSE);
          PrintFast(1,"\"");
       }
       if (fLineStyle > 1) {
@@ -1125,7 +1113,7 @@ void TSVG::DrawPS(Int_t nn, Double_t *xw, Double_t *yw)
             Int_t it;
             sscanf(((TObjString*)tokens->At(j))->GetName(), "%d", &it);
             if (j>0) PrintFast(1,",");
-            WriteInteger((Int_t)(it/4));
+            WriteReal(it/4);
          }
          delete tokens;
          PrintFast(1,"\"");
@@ -1143,14 +1131,13 @@ void TSVG::DrawPS(Int_t nn, Double_t *xw, Double_t *yw)
    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Initialize the SVG file. The main task of the function is to output the
+/// SVG header file which consist in <title>, <desc> and <defs>. The
+/// HeaderPS provided by the user program is written in the <defs> part.
 
-//______________________________________________________________________________
 void TSVG::Initialize()
 {
-   // Initialize the SVG file. The main task of the function is to output the
-   // SVG header file which consist in <title>, <desc> and <defs>. The
-   // HeaderPS provided by the user program is written in the <defs> part.
-
    // Title
    PrintStr("<title>@");
    PrintStr(GetName());
@@ -1178,37 +1165,35 @@ void TSVG::Initialize()
 
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Move to a new position (ix, iy). The move is done in relative coordinates
+/// which allows to have short numbers which decrease the size of the file.
+/// This function use the full power of the SVG's paths by using the
+/// horizontal and vertical move whenever it is possible.
 
-//______________________________________________________________________________
-void TSVG::MovePS(Int_t ix, Int_t iy)
+void TSVG::MovePS(Double_t ix, Double_t iy)
 {
-   // Move to a new position (ix, iy). The move is done in relative coordinates
-   // which allows to have short numbers which decrease the size of the file.
-   // This function use the full power of the SVG's paths by using the
-   // horizontal and vertical move whenever it is possible.
-
    if (ix != 0 && iy != 0)  {
       PrintFast(1,"l");
-      WriteInteger(ix);
+      WriteReal(ix);
       PrintFast(1,",");
-      WriteInteger(iy);
+      WriteReal(iy);
    } else if (ix != 0)  {
       PrintFast(1,"h");
-      WriteInteger(ix);
+      WriteReal(ix);
    } else if (iy != 0)  {
       PrintFast(1,"v");
-      WriteInteger(iy);
+      WriteReal(iy);
    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Start the SVG page. This function initialize the pad conversion
+/// coefficients and output the <svg> directive which is close later in the
+/// the function Close.
 
-//______________________________________________________________________________
 void TSVG::NewPage()
 {
-   // Start the SVG page. This function initialize the pad conversion
-   // coefficients and output the <svg> directive which is close later in the
-   // the function Close.
-
    // Compute pad conversion coefficients
    if (gPad) {
       Double_t ww   = gPad->GetWw();
@@ -1222,26 +1207,25 @@ void TSVG::NewPage()
    if(!fBoundingBox) {
       PrintStr("@<?xml version=\"1.0\" standalone=\"no\"?>");
       PrintStr("@<svg width=\"");
-      WriteInteger(CMtoSVG(fXsize), kFALSE);
+      WriteReal(CMtoSVG(fXsize), kFALSE);
       PrintStr("\" height=\"");
       fYsizeSVG = CMtoSVG(fYsize);
-      WriteInteger(fYsizeSVG, kFALSE);
+      WriteReal(fYsizeSVG, kFALSE);
       PrintStr("\" viewBox=\"0 0");
-      WriteInteger(CMtoSVG(fXsize));
-      WriteInteger(fYsizeSVG);
-      PrintStr("\" xmlns=\"http://www.w3.org/2000/svg\">");
+      WriteReal(CMtoSVG(fXsize));
+      WriteReal(fYsizeSVG);
+      PrintStr("\" xmlns=\"http://www.w3.org/2000/svg\" shape-rendering=\"crispEdges\">");
       PrintStr("@");
       Initialize();
       fBoundingBox  = kTRUE;
    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Set the range for the paper in centimetres
 
-//______________________________________________________________________________
 void TSVG::Range(Float_t xsize, Float_t ysize)
 {
-   // Set the range for the paper in centimetres
-
    Float_t xps, yps, xncm, yncm, dxwn, dywn, xwkwn, ywkwn, xymax;
 
    fXsize = xsize;
@@ -1290,63 +1274,57 @@ void TSVG::Range(Float_t xsize, Float_t ysize)
    fRange = kTRUE;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Set color index for fill areas
 
-//______________________________________________________________________________
 void TSVG::SetFillColor( Color_t cindex )
 {
-   // Set color index for fill areas
-
    fFillColor = cindex;
    if (gStyle->GetFillColor() <= 0) cindex = 0;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Set color index for lines
 
-//______________________________________________________________________________
 void TSVG::SetLineColor( Color_t cindex )
 {
-   // Set color index for lines
-
    fLineColor = cindex;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Change the line style
+///
+///  - linestyle = 2 dashed
+///  - linestyle = 3 dotted
+///  - linestyle = 4 dash-dotted
+///  - linestyle = else solid (1 in is used most of the time)
 
-//______________________________________________________________________________
 void TSVG::SetLineStyle(Style_t linestyle)
 {
-   // Change the line style
-   //
-   // linestyle = 2 dashed
-   //           = 3 dotted
-   //           = 4 dash-dotted
-   //           = else solid (1 in is used most of the time)
-
    fLineStyle = linestyle;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Set the lines width.
 
-//______________________________________________________________________________
 void TSVG::SetLineWidth(Width_t linewidth)
 {
-   // Set the lines width.
-
    fLineWidth = linewidth;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Set color index for markers.
 
-//______________________________________________________________________________
 void TSVG::SetMarkerColor( Color_t cindex )
 {
-   // Set color index for markers.
-
    fMarkerColor = cindex;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Set color with its color index
 
-//______________________________________________________________________________
 void TSVG::SetColor(Int_t color)
 {
-   // Set color with its color index
-
    if (color < 0) color = 0;
    TColor *col = gROOT->GetColor(color);
    if (col) {
@@ -1358,16 +1336,15 @@ void TSVG::SetColor(Int_t color)
    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Set color with its R G B components
+///
+///  - r: % of red in [0,1]
+///  --g: % of green in [0,1]
+///  - b: % of blue in [0,1]
 
-//______________________________________________________________________________
 void TSVG::SetColor(Float_t r, Float_t g, Float_t b)
 {
-   // Set color with its R G B components
-   //
-   //  r: % of red in [0,1]
-   //  g: % of green in [0,1]
-   //  b: % of blue in [0,1]
-
    if (r <= 0. && g <= 0. && b <= 0. ) {
       PrintFast(7,"\"black\"");
    } else if (r >= 1. && g >= 1. && b >= 1. ) {
@@ -1381,25 +1358,23 @@ void TSVG::SetColor(Float_t r, Float_t g, Float_t b)
    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Set color index for text
 
-//______________________________________________________________________________
 void TSVG::SetTextColor( Color_t cindex )
 {
-   // Set color index for text
-
    fTextColor = cindex;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Draw text
+///
+///  - xx: x position of the text
+///  - yy: y position of the text
+///  - chars: text to be drawn
 
-//______________________________________________________________________________
 void TSVG::Text(Double_t xx, Double_t yy, const char *chars)
 {
-   // Draw text
-   //
-   // xx: x position of the text
-   // yy: y position of the text
-   // chars: text to be drawn
-
    static const char *fontFamily[] = {
    "Times"    , "Times"    , "Times",
    "Helvetica", "Helvetica", "Helvetica"   , "Helvetica",
@@ -1418,12 +1393,12 @@ void TSVG::Text(Double_t xx, Double_t yy, const char *chars)
    "normal", "oblique", "normal", "oblique",
    "normal", "normal" , "normal", "italic"};
 
-   Int_t ix    = XtoSVG(xx);
-   Int_t iy    = YtoSVG(yy);
-   Int_t txalh = fTextAlign/10;
-   if (txalh <1) txalh = 1; if (txalh > 3) txalh = 3;
-   Int_t txalv = fTextAlign%10;
-   if (txalv <1) txalv = 1; if (txalv > 3) txalv = 3;
+   Double_t ix    = XtoSVG(xx);
+   Double_t iy    = YtoSVG(yy);
+   Double_t txalh = fTextAlign/10;
+   if (txalh <1) txalh = 1; else if (txalh > 3) txalh = 3;
+   Double_t txalv = fTextAlign%10;
+   if (txalv <1) txalv = 1; else if (txalv > 3) txalv = 3;
 
    Double_t     wh = (Double_t)gPad->XtoPixel(gPad->GetX2());
    Double_t     hh = (Double_t)gPad->YtoPixel(gPad->GetY1());
@@ -1439,7 +1414,7 @@ void TSVG::Text(Double_t xx, Double_t yy, const char *chars)
    }
    Int_t ifont = font-1;
 
-   Int_t fontsize = CMtoSVG(ftsize/fontrap);
+   Double_t fontsize = CMtoSVG(ftsize/fontrap);
    if( fontsize <= 0) return;
 
    if (txalv == 3) iy = iy+fontsize;
@@ -1448,19 +1423,19 @@ void TSVG::Text(Double_t xx, Double_t yy, const char *chars)
    if (fTextAngle != 0.) {
       PrintStr("@");
       PrintFast(21,"<g transform=\"rotate(");
-      WriteInteger(-Int_t(fTextAngle), kFALSE);
+      WriteReal(-fTextAngle, kFALSE);
       PrintFast(1,",");
-      WriteInteger(ix, kFALSE);
+      WriteReal(ix, kFALSE);
       PrintFast(1,",");
-      WriteInteger(iy, kFALSE);
+      WriteReal(iy, kFALSE);
       PrintFast(3,")\">");
    }
 
    PrintStr("@");
-   PrintFast(9,"<text x=\"");
-   WriteInteger(ix, kFALSE);
+   PrintFast(30,"<text xml:space=\"preserve\" x=\"");
+   WriteReal(ix, kFALSE);
    PrintFast(5,"\" y=\"");
-   WriteInteger(iy, kFALSE);
+   WriteReal(iy, kFALSE);
    PrintFast(1,"\"");
    if (txalh == 2) {
       PrintFast(21," text-anchor=\"middle\"");
@@ -1470,7 +1445,7 @@ void TSVG::Text(Double_t xx, Double_t yy, const char *chars)
    PrintFast(6," fill=");
    SetColor(Int_t(fTextColor));
    PrintFast(12," font-size=\"");
-   WriteInteger(fontsize, kFALSE);
+   WriteReal(fontsize, kFALSE);
    PrintFast(15,"\" font-family=\"");
    PrintStr(fontFamily[ifont]);
    if (strcmp(fontWeight[ifont],"normal")) {
@@ -1482,31 +1457,82 @@ void TSVG::Text(Double_t xx, Double_t yy, const char *chars)
       PrintStr(fontStyle[ifont]);
    }
    PrintFast(2,"\">");
-   PrintStr("@");
+
    if (font == 12 || font == 15) {
       Int_t ichar = chars[0]+848;
       Int_t ic    = ichar;
 
-      // Math Symbols
-      if (ic == 755) ichar = 8804;
-      if (ic == 759) ichar = 9827;
-      if (ic == 760) ichar = 9830;
-      if (ic == 761) ichar = 9829;
-      if (ic == 762) ichar = 9824;
-      if (ic == 766) ichar = 8594;
-      if (ic == 776) ichar =  247;
-      if (ic == 757) ichar = 8734;
-      if (ic == 758) ichar =  402;
-      if (ic == 771) ichar = 8805;
-      if (ic == 774) ichar = 8706;
-      if (ic == 775) ichar = 8226;
-      if (ic == 779) ichar = 8776;
-      if (ic == 805) ichar = 8719;
-      if (ic == 821) ichar = 8721;
-      if (ic == 834) ichar = 8747;
-      if (ic == 769) ichar =  177;
-      if (ic == 772) ichar =  215;
-      if (ic == 768) ichar =  176;
+      // Math Symbols (cf: http://www.fileformat.info/info/unicode/category/Sm/list.htm)
+      if (ic == 755) ichar =  8804;
+      if (ic == 759) ichar =  9827;
+      if (ic == 760) ichar =  9830;
+      if (ic == 761) ichar =  9829;
+      if (ic == 762) ichar =  9824;
+      if (ic == 766) ichar =  8594;
+      if (ic == 776) ichar =   247;
+      if (ic == 757) ichar =  8734;
+      if (ic == 758) ichar =   402;
+      if (ic == 771) ichar =  8805;
+      if (ic == 774) ichar =  8706;
+      if (ic == 775) ichar =  8226;
+      if (ic == 779) ichar =  8776;
+      if (ic == 805) ichar =  8719;
+      if (ic == 821) ichar =  8721;
+      if (ic == 834) ichar =  8747;
+      if (ic == 769) ichar =   177;
+      if (ic == 772) ichar =   215;
+      if (ic == 768) ichar =   176;
+      if (ic == 791) ichar =  8745;
+      if (ic == 793) ichar =  8835; // SUPERSET OF
+      if (ic == 794) ichar =  8839; // SUPERSET OF OR EQUAL TO
+      if (ic == 795) ichar =  8836; // NOT A SUBSET OF
+      if (ic == 796) ichar =  8834;
+      if (ic == 893) ichar =  8722;
+      if (ic == 803) ichar =   169; // COPYRIGHT SIGN
+      if (ic == 819) ichar =   169; // COPYRIGHT SIGN
+      if (ic == 804) ichar =  8482;
+      if (ic == 770) ichar =    34;
+      if (ic == 823) ichar = 10072;
+      if (ic == 781) ichar = 10072;
+      if (ic == 824) ichar =  9117; // LEFT PARENTHESIS LOWER HOOK
+      if (ic == 822) ichar =  9115; // LEFT PARENTHESIS UPPER HOOK
+      if (ic == 767) ichar =  8595; // DOWNWARDS ARROW
+      if (ic == 763) ichar =  8596; // LEFT RIGHT ARROW
+      if (ic == 764) ichar =  8592; // LEFTWARDS ARROW
+      if (ic == 788) ichar =  8855; // CIRCLED TIMES
+      if (ic == 784) ichar =  8501;
+      if (ic == 777) ichar =  8800;
+      if (ic == 797) ichar =  8838;
+      if (ic == 800) ichar =  8736;
+      if (ic == 812) ichar =  8656; // LEFTWARDS DOUBLE ARROW
+      if (ic == 817) ichar =    60; // LESS-THAN SIGN
+      if (ic == 833) ichar =    62; // GREATER-THAN SIGN
+      if (ic == 778) ichar =  8803; // STRICTLY EQUIVALENT TO
+      if (ic == 809) ichar =  8743; // LOGICAL AND
+      if (ic == 802) ichar =  9415; // CIRCLED LATIN CAPITAL LETTER R
+      if (ic == 780) ichar =  8230; // HORIZONTAL ELLIPSIS
+      if (ic == 801) ichar =  8711; // NABLA
+      if (ic == 783) ichar =  8629; // DOWNWARDS ARROW WITH CORNER LEFTWARDS
+      if (ic == 782) ichar =  8213;
+      if (ic == 799) ichar =  8713;
+      if (ic == 792) ichar =  8746;
+      if (ic == 828) ichar =  9127;
+      if (ic == 765) ichar =  8593; // UPWARDS ARROW
+      if (ic == 789) ichar =  8853; // CIRCLED PLUS
+      if (ic == 813) ichar =  8657; // UPWARDS DOUBLE ARROW
+      if (ic == 773) ichar =  8733; // PROPORTIONAL TO
+      if (ic == 790) ichar =  8709; // EMPTY SET
+      if (ic == 810) ichar =  8744;
+      if (ic == 756) ichar =  8260;
+      if (ic == 807) ichar =  8231;
+      if (ic == 808) ichar =  8989; // TOP RIGHT CORNER
+      if (ic == 814) ichar =  8658; // RIGHTWARDS DOUBLE ARROW
+      if (ic == 806) ichar =  8730; // SQUARE ROOT
+      if (ic == 827) ichar =  9123;
+      if (ic == 829) ichar =  9128;
+      if (ic == 786) ichar =  8476;
+      if (ic == 785) ichar =  8465;
+      if (ic == 787) ichar =  8472;
 
       // Greek characters
       if (ic == 918) ichar = 934;
@@ -1552,6 +1578,10 @@ void TSVG::Text(Double_t xx, Double_t yy, const char *chars)
                PrintFast(4,"&lt;");
             } else if (chars[i]=='>') {
                PrintFast(4,"&gt;");
+            } else if (chars[i]=='\305') {
+               PrintFast(7,"&#8491;"); // ANGSTROM SIGN
+            } else if (chars[i]=='\345') {
+               PrintFast(6,"&#229;");
             } else if (chars[i]=='&') {
                PrintFast(5,"&amp;");
             } else {
@@ -1560,7 +1590,7 @@ void TSVG::Text(Double_t xx, Double_t yy, const char *chars)
          }
       }
    }
-   PrintStr("@");
+
    PrintFast(7,"</text>");
 
    if (fTextAngle != 0.) {
@@ -1569,90 +1599,81 @@ void TSVG::Text(Double_t xx, Double_t yy, const char *chars)
    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Write a string of characters in NDC
 
-//______________________________________________________________________________
 void TSVG::TextNDC(Double_t u, Double_t v, const char *chars)
 {
-   // Write a string of characters in NDC
-
    Double_t x = gPad->GetX1() + u*(gPad->GetX2() - gPad->GetX1());
    Double_t y = gPad->GetY1() + v*(gPad->GetY2() - gPad->GetY1());
    Text(x, y, chars);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Convert U from NDC coordinate to SVG
 
-//______________________________________________________________________________
-Int_t TSVG::UtoSVG(Double_t u)
+Double_t TSVG::UtoSVG(Double_t u)
 {
-   // Convert U from NDC coordinate to SVG
-
    Double_t cm = fXsize*(gPad->GetAbsXlowNDC() + u*gPad->GetAbsWNDC());
-   return Int_t(0.5 + 72*cm/2.54);
+   return 0.5 + 72*cm/2.54;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Convert V from NDC coordinate to SVG
 
-//______________________________________________________________________________
-Int_t TSVG::VtoSVG(Double_t v)
+Double_t TSVG::VtoSVG(Double_t v)
 {
-   // Convert V from NDC coordinate to SVG
-
    Double_t cm = fYsize*(gPad->GetAbsYlowNDC() + v*gPad->GetAbsHNDC());
-   return Int_t(0.5 + 72*cm/2.54);
+   return 0.5 + 72*cm/2.54;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Convert X from world coordinate to SVG
 
-//______________________________________________________________________________
-Int_t TSVG::XtoSVG(Double_t x)
+Double_t TSVG::XtoSVG(Double_t x)
 {
-   // Convert X from world coordinate to SVG
-
    Double_t u = (x - gPad->GetX1())/(gPad->GetX2() - gPad->GetX1());
    return  UtoSVG(u);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Convert Y from world coordinate to SVG
 
-//______________________________________________________________________________
-Int_t TSVG::YtoSVG(Double_t y)
+Double_t TSVG::YtoSVG(Double_t y)
 {
-   // Convert Y from world coordinate to SVG
-
    Double_t v = (y - gPad->GetY1())/(gPad->GetY2() - gPad->GetY1());
    return  fYsizeSVG-VtoSVG(v);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Begin the Cell Array painting
 
-//______________________________________________________________________________
 void TSVG::CellArrayBegin(Int_t, Int_t, Double_t, Double_t, Double_t,
                           Double_t)
 {
-   // Begin the Cell Array painting
-
    Warning("TSVG::CellArrayBegin", "not yet implemented");
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Paint the Cell Array
 
-//______________________________________________________________________________
 void TSVG::CellArrayFill(Int_t, Int_t, Int_t)
 {
-   // Paint the Cell Array
-
    Warning("TSVG::CellArrayFill", "not yet implemented");
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// End the Cell Array painting
 
-//______________________________________________________________________________
 void TSVG::CellArrayEnd()
 {
-   // End the Cell Array painting
-
    Warning("TSVG::CellArrayEnd", "not yet implemented");
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Not needed in SVG case
 
-//______________________________________________________________________________
 void TSVG::DrawPS(Int_t, Float_t *, Float_t *)
 {
-   // Not needed in SVG case
-
    Warning("TSVG::DrawPS", "not yet implemented");
 }

@@ -10,17 +10,14 @@
 // RUN: cat %s | %cling 2>&1 | FileCheck %s
 // Test handling and recovery from calling an unresolved symbol.
 
-.rawInput
-int foo(); // extern C++
+extern int foo(); // extern C++
 void bar() { foo(); }
-.rawInput
 extern "C" int functionWithoutDefinition();
 
 int i = 42;
 i = functionWithoutDefinition();
-// CHECK: IncrementalExecutor::executeFunction: symbol 'functionWithoutDefinition' unresolved while linking function
+// CHECK: IncrementalExecutor::executeFunction: symbol 'functionWithoutDefinition' unresolved while linking
 i = foo();
-// CHECK: IncrementalExecutor::executeFunction: symbol '{{.*}}foo{{.*}}' unresolved while linking function
 
 extern "C" int printf(const char* fmt, ...);
 printf("got i=%d\n", i); // CHECK: got i=42
@@ -29,12 +26,7 @@ int a = 12// CHECK: (int) 12
 foo()
 // CHECK: IncrementalExecutor::executeFunction: symbol '{{.*}}foo{{.*}}' unresolved
 functionWithoutDefinition();
-// CHECK: IncrementalExecutor::executeFunction: symbol 'functionWithoutDefinition' unresolved while linking function
-
-bar();
-// CHECK: IncrementalExecutor::executeFunction: symbol '{{.*}}foo{{.*}}' unresolved while linking function
-bar();
-// CHECK: IncrementalExecutor: calling unresolved symbol, see previous error message!
+// CHECK: IncrementalExecutor::executeFunction: symbol 'functionWithoutDefinition' unresolved while linking
 
 i = 13 //CHECK: (int) 13
 .q

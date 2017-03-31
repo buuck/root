@@ -1,5 +1,10 @@
-#include "TFormulaPrimitive.h"
+#include "v5/TFormulaPrimitive.h"
 #include "TMath.h"
+
+namespace ROOT {
+
+   namespace v5 {
+      
 void TMath_GenerInterface(){
 //
 // Automatically generated code  - don't modify it
@@ -114,3 +119,8 @@ TFormulaPrimitive::AddFormula(new TFormulaPrimitive("TMath::StudentI","TMath::St
 TFormulaPrimitive::AddFormula(new TFormulaPrimitive("TMath::Vavilov","TMath::Vavilov",(TFormulaPrimitive::GenFunc1110)TMath::Vavilov));
 TFormulaPrimitive::AddFormula(new TFormulaPrimitive("TMath::VavilovI","TMath::VavilovI",(TFormulaPrimitive::GenFunc1110)TMath::VavilovI));
 }
+
+   } // end namespace v5
+
+} // end namespace ROOT
+      

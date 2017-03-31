@@ -23,8 +23,6 @@
 
 #ifdef __cplusplus
 
-#include "cling/Interpreter/RuntimeException.h"
-
 #include <new>
 
 namespace cling {
@@ -41,13 +39,6 @@ namespace cling {
     extern Interpreter* gCling;
 
     namespace internal {
-      ///\brief Manually provided by cling missing function resolution using
-      /// addSymbol()
-      ///
-      /// Implemented in Interpreter.cpp
-      ///
-      int local_cxa_atexit(void (*func) (void*), void* arg, void* interp);
-
       /// \brief Some of clang's routines rely on valid source locations and
       /// source ranges. This member can be looked up and source locations and
       /// ranges can be passed in as parameters to these routines.
@@ -63,7 +54,7 @@ namespace cling {
       ///\param [in] vpT - The opaque ptr for the cling::Transaction.
       ///\param [out] vpSVR - The Value that is created.
       ///
-      void setValueNoAlloc(void* vpI, void* vpSVR, void* vpQT, void* vpT);
+      void setValueNoAlloc(void* vpI, void* vpSVR, void* vpQT, char vpOn);
 
       ///\brief Set the value of the GenericValue for the expression
       /// evaluated at the prompt.
@@ -74,7 +65,7 @@ namespace cling {
       ///\param [in] vpT - The opaque ptr for the cling::Transaction.
       ///\param [out] vpSVR - The Value that is created.
       ///
-      void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, void* vpT,
+      void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, char vpOn,
                            float value);
 
       ///\brief Set the value of the GenericValue for the expression
@@ -86,7 +77,7 @@ namespace cling {
       ///\param [in] vpT - The opaque ptr for the cling::Transaction.
       ///\param [out] vpSVR - The Value that is created.
       ///
-      void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, void* vpT,
+      void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, char vpOn,
                            double value);
 
       ///\brief Set the value of the GenericValue for the expression
@@ -99,7 +90,7 @@ namespace cling {
       ///\param [in] vpT - The opaque ptr for the cling::Transaction.
       ///\param [out] vpSVR - The Value that is created.
       ///
-      void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, void* vpT,
+      void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, char vpOn,
                            long double value);
 
       ///\brief Set the value of the GenericValue for the expression
@@ -113,7 +104,7 @@ namespace cling {
       ///\param [in] vpT - The opaque ptr for the cling::Transaction.
       ///\param [out] vpSVR - The Value that is created.
       ///
-      void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, void* vpT,
+      void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, char vpOn,
                            unsigned long long value);
 
       ///\brief Set the value of the GenericValue for the expression
@@ -125,7 +116,7 @@ namespace cling {
       ///\param [in] vpT - The opaque ptr for the cling::Transaction.
       ///\param [out] vpV - The Value that is created.
       ///
-      void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, void* vpT,
+      void setValueNoAlloc(void* vpI, void* vpV, void* vpQT, char vpOn,
                            const void* value);
 
       ///\brief Set the value of the Generic value and return the address
@@ -137,7 +128,7 @@ namespace cling {
       ///
       ///\returns the address where the value should be put.
       ///
-      void* setValueWithAlloc(void* vpI, void* vpV, void* vpQT, void* vpT);
+      void* setValueWithAlloc(void* vpI, void* vpV, void* vpQT, char vpOn);
 
       ///\brief Placement new doesn't work for arrays. It needs to be called on
       /// each element. For non-PODs we also need to call the *structors. This
@@ -169,7 +160,7 @@ namespace cling {
       ///\param[in] size - size of the array.
       ///
       template <typename T>
-      void copyArray(T* src, void* placement, int size) {
+      void copyArray(T* src, void* placement, std::size_t size) {
         for (int i = 0; i < size; ++i)
           new ((void*)(((T*)placement) + i)) T(src[i]);
       }
@@ -179,34 +170,15 @@ namespace cling {
 
 using namespace cling::runtime;
 
-// Global d'tors only for C++:
-#if _WIN32
 extern "C" {
-
-  ///\brief Fake definition to avoid compilation missing function in windows
-  /// environment it wont ever be called
-  void __dso_handle(){}
-  //Fake definition to avoid compilation missing function in windows environment
-  //it wont ever be called
-  int __cxa_atexit(void (* /*func*/) (), void* /*arg*/, void* /*dso*/) {
-    return 0;
-  }
-}
-#endif
-
-extern "C" {
-  int cling_cxa_atexit(void (*func) (void*), void* arg, void* /*dso*/) {
-    return cling::runtime::internal::local_cxa_atexit(func, arg,
-                                                 (void*)cling::runtime::gCling);
-  }
-
-  ///\brief a function that throws NullDerefException. This allows to 'hide' the
-  /// definition of the exceptions from the RuntimeUniverse and allows us to
+  ///\brief a function that throws InvalidDerefException. This allows to 'hide'
+  /// the definition of the exceptions from the RuntimeUniverse and allows us to
   /// run cling in -no-rtti mode.
   ///
-  void cling__runtime__internal__throwNullDerefException(void* Sema,
-                                                         void* Expr);
 
+  void* cling_runtime_internal_throwIfInvalidPointer(void* Sema,
+                                                    void* Expr,
+                                                    const void* Arg);
 }
 #endif // __cplusplus
 

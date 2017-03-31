@@ -12,22 +12,9 @@
 #ifndef ROOT_TMySQLRow
 #define ROOT_TMySQLRow
 
-#ifndef ROOT_TSQLRow
 #include "TSQLRow.h"
-#endif
 
-#if !defined(__CINT__)
-#ifdef R__WIN32
-#include <winsock2.h>
-#else
-#include <sys/time.h>
-#endif
 #include <mysql.h>
-#else
-struct MYSQL_RES;
-typedef char **MYSQL_ROW;
-#endif
-
 
 class TMySQLRow : public TSQLRow {
 

@@ -6,14 +6,16 @@
 // LICENSE.TXT for details.
 //------------------------------------------------------------------------------
 
-// RUN: cat %s | %cling -I%p | FileCheck %s
+// RUN: cat %s | %built_cling -I%p | FileCheck %s
 
 #include "cling/Interpreter/Interpreter.h"
 #include "cling/Interpreter/InterpreterCallbacks.h"
 
 .dynamicExtensions
 
-gCling->setCallbacks(new cling::test::SymbolResolverCallback(gCling));
+std::unique_ptr<cling::test::SymbolResolverCallback> SRC;
+SRC.reset(new cling::test::SymbolResolverCallback(gCling))
+gCling->setCallbacks(std::move(SRC));
 
 // Fixed size arrays
 int a[5] = {1,2,3,4,5};

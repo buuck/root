@@ -7,8 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_RUNTIMEDYLDMACHOAARCH64_H
-#define LLVM_RUNTIMEDYLDMACHOAARCH64_H
+#ifndef LLVM_LIB_EXECUTIONENGINE_RUNTIMEDYLD_TARGETS_RUNTIMEDYLDMACHOAARCH64_H
+#define LLVM_LIB_EXECUTIONENGINE_RUNTIMEDYLD_TARGETS_RUNTIMEDYLDMACHOAARCH64_H
 
 #include "../RuntimeDyldMachO.h"
 #include "llvm/Support/Endian.h"
@@ -20,19 +20,25 @@ namespace llvm {
 class RuntimeDyldMachOAArch64
     : public RuntimeDyldMachOCRTPBase<RuntimeDyldMachOAArch64> {
 public:
-  RuntimeDyldMachOAArch64(RTDyldMemoryManager *MM)
-      : RuntimeDyldMachOCRTPBase(MM) {}
+
+  typedef uint64_t TargetPtrT;
+
+  RuntimeDyldMachOAArch64(RuntimeDyld::MemoryManager &MM,
+                          RuntimeDyld::SymbolResolver &Resolver)
+      : RuntimeDyldMachOCRTPBase(MM, Resolver) {}
 
   unsigned getMaxStubSize() override { return 8; }
 
   unsigned getStubAlignment() override { return 8; }
 
   /// Extract the addend encoded in the instruction / memory location.
-  int64_t decodeAddend(uint8_t *LocalAddress, unsigned NumBytes,
-                       MachO::RelocationInfoType RelType) const {
+  int64_t decodeAddend(const RelocationEntry &RE) const {
+    const SectionEntry &Section = Sections[RE.SectionID];
+    uint8_t *LocalAddress = Section.getAddressWithOffset(RE.Offset);
+    unsigned NumBytes = 1 << RE.Size;
     int64_t Addend = 0;
     // Verify that the relocation has the correct size and alignment.
-    switch (RelType) {
+    switch (RE.RelType) {
     default:
       llvm_unreachable("Unsupported relocation type!");
     case MachO::ARM64_RELOC_UNSIGNED:
@@ -49,7 +55,7 @@ public:
       break;
     }
 
-    switch (RelType) {
+    switch (RE.RelType) {
     default:
       llvm_unreachable("Unsupported relocation type!");
     case MachO::ARM64_RELOC_UNSIGNED:
@@ -178,8 +184,8 @@ public:
       assert(isInt<33>(Addend) && "Invalid page reloc value.");
 
       // Encode the addend into the instruction.
-      uint32_t ImmLoValue = (uint32_t)(Addend << 17) & 0x60000000;
-      uint32_t ImmHiValue = (uint32_t)(Addend >> 9) & 0x00FFFFE0;
+      uint32_t ImmLoValue = ((uint64_t)Addend << 17) & 0x60000000;
+      uint32_t ImmHiValue = ((uint64_t)Addend >> 9) & 0x00FFFFE0;
       *p = (*p & 0x9F00001F) | ImmHiValue | ImmLoValue;
       break;
     }
@@ -236,16 +242,19 @@ public:
     }
   }
 
-  relocation_iterator
+  Expected<relocation_iterator>
   processRelocationRef(unsigned SectionID, relocation_iterator RelI,
-                       ObjectImage &ObjImg, ObjSectionToIDMap &ObjSectionToID,
-                       const SymbolTableMap &Symbols, StubMap &Stubs) override {
+                       const ObjectFile &BaseObjT,
+                       ObjSectionToIDMap &ObjSectionToID,
+                       StubMap &Stubs) override {
     const MachOObjectFile &Obj =
-        static_cast<const MachOObjectFile &>(*ObjImg.getObjectFile());
+      static_cast<const MachOObjectFile &>(BaseObjT);
     MachO::any_relocation_info RelInfo =
         Obj.getRelocation(RelI->getRawDataRefImpl());
 
-    assert(!Obj.isRelocationScattered(RelInfo) && "");
+    if (Obj.isRelocationScattered(RelInfo))
+      return make_error<RuntimeDyldError>("Scattered relocations not supported "
+                                          "for MachO AArch64");
 
     // ARM64 has an ARM64_RELOC_ADDEND relocation type that carries an explicit
     // addend for the following relocation. If found: (1) store the associated
@@ -263,22 +272,28 @@ public:
       RelInfo = Obj.getRelocation(RelI->getRawDataRefImpl());
     }
 
-    RelocationEntry RE(getBasicRelocationEntry(SectionID, ObjImg, RelI));
-    RelocationValueRef Value(
-        getRelocationValueRef(ObjImg, RelI, RE, ObjSectionToID, Symbols));
+    if (Obj.getAnyRelocationType(RelInfo) == MachO::ARM64_RELOC_SUBTRACTOR)
+      return processSubtractRelocation(SectionID, RelI, Obj, ObjSectionToID);
+
+    RelocationEntry RE(getRelocationEntry(SectionID, Obj, RelI));
+    RE.Addend = decodeAddend(RE);
 
     assert((ExplicitAddend == 0 || RE.Addend == 0) && "Relocation has "\
       "ARM64_RELOC_ADDEND and embedded addend in the instruction.");
-    if (ExplicitAddend) {
+    if (ExplicitAddend)
       RE.Addend = ExplicitAddend;
-      Value.Addend = ExplicitAddend;
-    }
+
+    RelocationValueRef Value;
+    if (auto ValueOrErr = getRelocationValueRef(Obj, RelI, RE, ObjSectionToID))
+      Value = *ValueOrErr;
+    else
+      return ValueOrErr.takeError();
 
     bool IsExtern = Obj.getPlainRelocationExternal(RelInfo);
     if (!IsExtern && RE.IsPCRel)
-      makeValueAddendPCRel(Value, ObjImg, RelI, 1 << RE.Size);
+      makeValueAddendPCRel(Value, RelI, 1 << RE.Size);
 
-    RE.Addend = Value.Addend;
+    RE.Addend = Value.Offset;
 
     if (RE.RelType == MachO::ARM64_RELOC_GOT_LOAD_PAGE21 ||
         RE.RelType == MachO::ARM64_RELOC_GOT_LOAD_PAGEOFF12)
@@ -293,11 +308,11 @@ public:
     return ++RelI;
   }
 
-  void resolveRelocation(const RelocationEntry &RE, uint64_t Value) {
+  void resolveRelocation(const RelocationEntry &RE, uint64_t Value) override {
     DEBUG(dumpRelocationToResolve(RE, Value));
 
     const SectionEntry &Section = Sections[RE.SectionID];
-    uint8_t *LocalAddress = Section.Address + RE.Offset;
+    uint8_t *LocalAddress = Section.getAddressWithOffset(RE.Offset);
     MachO::RelocationInfoType RelType =
       static_cast<MachO::RelocationInfoType>(RE.RelType);
 
@@ -317,7 +332,7 @@ public:
     case MachO::ARM64_RELOC_BRANCH26: {
       assert(RE.IsPCRel && "not PCRel and ARM64_RELOC_BRANCH26 not supported");
       // Check if branch is in range.
-      uint64_t FinalAddress = Section.LoadAddress + RE.Offset;
+      uint64_t FinalAddress = Section.getLoadAddressWithOffset(RE.Offset);
       int64_t PCRelVal = Value - FinalAddress + RE.Addend;
       encodeAddend(LocalAddress, /*Size=*/4, RelType, PCRelVal);
       break;
@@ -326,7 +341,7 @@ public:
     case MachO::ARM64_RELOC_PAGE21: {
       assert(RE.IsPCRel && "not PCRel and ARM64_RELOC_PAGE21 not supported");
       // Adjust for PC-relative relocation and offset.
-      uint64_t FinalAddress = Section.LoadAddress + RE.Offset;
+      uint64_t FinalAddress = Section.getLoadAddressWithOffset(RE.Offset);
       int64_t PCRelVal =
         ((Value + RE.Addend) & (-4096)) - (FinalAddress & (-4096));
       encodeAddend(LocalAddress, /*Size=*/4, RelType, PCRelVal);
@@ -342,7 +357,15 @@ public:
       encodeAddend(LocalAddress, /*Size=*/4, RelType, Value);
       break;
     }
-    case MachO::ARM64_RELOC_SUBTRACTOR:
+    case MachO::ARM64_RELOC_SUBTRACTOR: {
+      uint64_t SectionABase = Sections[RE.Sections.SectionA].getLoadAddress();
+      uint64_t SectionBBase = Sections[RE.Sections.SectionB].getLoadAddress();
+      assert((Value == SectionABase || Value == SectionBBase) &&
+             "Unexpected SUBTRACTOR relocation value.");
+      Value = SectionABase - SectionBBase + RE.Addend;
+      writeBytesUnaligned(Value, LocalAddress, 1 << RE.Size);
+      break;
+    }
     case MachO::ARM64_RELOC_POINTER_TO_GOT:
     case MachO::ARM64_RELOC_TLVP_LOAD_PAGE21:
     case MachO::ARM64_RELOC_TLVP_LOAD_PAGEOFF12:
@@ -353,8 +376,10 @@ public:
     }
   }
 
-  void finalizeSection(ObjectImage &ObjImg, unsigned SectionID,
-                       const SectionRef &Section) {}
+  Error finalizeSection(const ObjectFile &Obj, unsigned SectionID,
+                       const SectionRef &Section) {
+    return Error::success();
+  }
 
 private:
   void processGOTRelocation(const RelocationEntry &RE,
@@ -362,38 +387,79 @@ private:
     assert(RE.Size == 2);
     SectionEntry &Section = Sections[RE.SectionID];
     StubMap::const_iterator i = Stubs.find(Value);
-    uint8_t *Addr;
+    int64_t Offset;
     if (i != Stubs.end())
-      Addr = Section.Address + i->second;
+      Offset = static_cast<int64_t>(i->second);
     else {
       // FIXME: There must be a better way to do this then to check and fix the
       // alignment every time!!!
-      uintptr_t BaseAddress = uintptr_t(Section.Address);
+      uintptr_t BaseAddress = uintptr_t(Section.getAddress());
       uintptr_t StubAlignment = getStubAlignment();
       uintptr_t StubAddress =
-          (BaseAddress + Section.StubOffset + StubAlignment - 1) &
+          (BaseAddress + Section.getStubOffset() + StubAlignment - 1) &
           -StubAlignment;
       unsigned StubOffset = StubAddress - BaseAddress;
       Stubs[Value] = StubOffset;
       assert(((StubAddress % getStubAlignment()) == 0) &&
              "GOT entry not aligned");
       RelocationEntry GOTRE(RE.SectionID, StubOffset,
-                            MachO::ARM64_RELOC_UNSIGNED, Value.Addend,
+                            MachO::ARM64_RELOC_UNSIGNED, Value.Offset,
                             /*IsPCRel=*/false, /*Size=*/3);
       if (Value.SymbolName)
         addRelocationForSymbol(GOTRE, Value.SymbolName);
       else
         addRelocationForSection(GOTRE, Value.SectionID);
-      Section.StubOffset = StubOffset + getMaxStubSize();
-      Addr = (uint8_t *)StubAddress;
+      Section.advanceStubOffset(getMaxStubSize());
+      Offset = static_cast<int64_t>(StubOffset);
     }
-    RelocationEntry TargetRE(RE.SectionID, RE.Offset, RE.RelType, /*Addend=*/0,
+    RelocationEntry TargetRE(RE.SectionID, RE.Offset, RE.RelType, Offset,
                              RE.IsPCRel, RE.Size);
-    resolveRelocation(TargetRE, (uint64_t)Addr);
+    addRelocationForSection(TargetRE, RE.SectionID);
   }
+
+  Expected<relocation_iterator>
+  processSubtractRelocation(unsigned SectionID, relocation_iterator RelI,
+                            const ObjectFile &BaseObjT,
+                            ObjSectionToIDMap &ObjSectionToID) {
+    const MachOObjectFile &Obj =
+        static_cast<const MachOObjectFile&>(BaseObjT);
+    MachO::any_relocation_info RE =
+        Obj.getRelocation(RelI->getRawDataRefImpl());
+
+    unsigned Size = Obj.getAnyRelocationLength(RE);
+    uint64_t Offset = RelI->getOffset();
+    uint8_t *LocalAddress = Sections[SectionID].getAddressWithOffset(Offset);
+    unsigned NumBytes = 1 << Size;
+
+    Expected<StringRef> SubtrahendNameOrErr = RelI->getSymbol()->getName();
+    if (!SubtrahendNameOrErr)
+      return SubtrahendNameOrErr.takeError();
+    auto SubtrahendI = GlobalSymbolTable.find(*SubtrahendNameOrErr);
+    unsigned SectionBID = SubtrahendI->second.getSectionID();
+    uint64_t SectionBOffset = SubtrahendI->second.getOffset();
+    int64_t Addend =
+      SignExtend64(readBytesUnaligned(LocalAddress, NumBytes), NumBytes * 8);
+
+    ++RelI;
+    Expected<StringRef> MinuendNameOrErr = RelI->getSymbol()->getName();
+    if (!MinuendNameOrErr)
+      return MinuendNameOrErr.takeError();
+    auto MinuendI = GlobalSymbolTable.find(*MinuendNameOrErr);
+    unsigned SectionAID = MinuendI->second.getSectionID();
+    uint64_t SectionAOffset = MinuendI->second.getOffset();
+
+    RelocationEntry R(SectionID, Offset, MachO::ARM64_RELOC_SUBTRACTOR, (uint64_t)Addend,
+                      SectionAID, SectionAOffset, SectionBID, SectionBOffset,
+                      false, Size);
+
+    addRelocationForSection(R, SectionAID);
+
+    return ++RelI;
+  }
+
 };
 }
 
 #undef DEBUG_TYPE
 
-#endif // LLVM_RUNTIMEDYLDMACHOAARCH64_H
+#endif

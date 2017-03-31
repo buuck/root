@@ -44,7 +44,7 @@ public:
   virtual Double_t analyticalIntegral(Int_t code, const char* rangeName=0) const;
 
 
-  RooArgSet components() { RooArgSet tmp(_compRSet) ; tmp.add(_compCSet) ; return tmp ; }
+  RooArgList components() { RooArgList tmp(_compRSet) ; tmp.add(_compCSet) ; return tmp ; }
 
   virtual ~RooProduct() ;
 
@@ -56,12 +56,13 @@ public:
   virtual std::list<Double_t>* plotSamplingHint(RooAbsRealLValue& /*obs*/, Double_t /*xlo*/, Double_t /*xhi*/) const ;
   virtual Bool_t isBinnedDistribution(const RooArgSet& obs) const ;
 
+  virtual CacheMode canNodeBeCached() const { return RooAbsArg::NotAdvised ; } ;
+  virtual void setCacheAndTrackHints(RooArgSet&) ;
+
 protected:
 
   RooListProxy _compRSet ;
   RooListProxy _compCSet ;
-  TIterator* _compRIter ;  //! do not persist
-  TIterator* _compCIter ;  //! do not persist
 
   class CacheElem : public RooAbsCacheElement {
   public:

@@ -1,6 +1,14 @@
-// 2-D histograms with alphanumeric labels
-// author; Rene Brun
-void hlabels2()
+/// \file
+/// \ingroup tutorial_hist
+/// \notebook
+/// 2-D histograms with alphanumeric labels.
+///
+/// \macro_image
+/// \macro_code
+///
+/// \author Rene Brun
+
+TCanvas *hlabels2()
 {
    const Int_t nx = 12;
    const Int_t ny = 20;
@@ -11,7 +19,7 @@ void hlabels2()
       "Fons","Rene","Nicolas","Xavier","Greg","Bjarne","Anton",
       "Otto","Eddy","Peter","Pasha","Philippe","Suzanne","Jeff",
       "Valery"};
-   TCanvas *c1 = new TCanvas("c1","demo bin labels",10,10,800,800);
+   TCanvas *c1 = new TCanvas("c1","demo bin labels",10,10,600,600);
    c1->SetGrid();
    c1->SetLeftMargin(0.15);
    c1->SetBottomMargin(0.15);
@@ -37,4 +45,5 @@ void hlabels2()
    pt->AddText(" \">\"   to sort by decreasing values");
    pt->AddText(" \"<\"   to sort by increasing values");
    pt->Draw();
+   return c1;
 }

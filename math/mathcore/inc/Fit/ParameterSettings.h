@@ -15,9 +15,7 @@
 
 #include <string>
 
-#ifndef ROOT_Math_Error
 #include "Math/Error.h"
-#endif
 
 
 namespace ROOT {
@@ -155,8 +153,8 @@ public:
          return;
       }
       if (low > fValue || up < fValue) {
-         MATH_INFO_MSG("ParameterSettings","lower/upper bounds outside current parameter value. The value will be set to (up-low)/2 ");
-         fValue = 0.5 * (up-low);
+         MATH_INFO_MSG("ParameterSettings","lower/upper bounds outside current parameter value. The value will be set to (low+up)/2 ");
+         fValue = 0.5 * (up+low);
       }
       fLowerLimit = low;
       fUpperLimit = up;

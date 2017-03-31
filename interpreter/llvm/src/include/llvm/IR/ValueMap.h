@@ -27,10 +27,14 @@
 #define LLVM_IR_VALUEMAP_H
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/Optional.h"
+#include "llvm/IR/TrackingMDRef.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/Mutex.h"
+#include "llvm/Support/UniqueLock.h"
 #include "llvm/Support/type_traits.h"
 #include <iterator>
+#include <memory>
 
 namespace llvm {
 
@@ -78,11 +82,16 @@ class ValueMap {
   friend class ValueMapCallbackVH<KeyT, ValueT, Config>;
   typedef ValueMapCallbackVH<KeyT, ValueT, Config> ValueMapCVH;
   typedef DenseMap<ValueMapCVH, ValueT, DenseMapInfo<ValueMapCVH> > MapT;
+  typedef DenseMap<const Metadata *, TrackingMDRef> MDMapT;
   typedef typename Config::ExtraData ExtraData;
   MapT Map;
+  Optional<MDMapT> MDMap;
   ExtraData Data;
-  ValueMap(const ValueMap&) LLVM_DELETED_FUNCTION;
-  ValueMap& operator=(const ValueMap&) LLVM_DELETED_FUNCTION;
+
+  bool MayMapMetadata = true;
+
+  ValueMap(const ValueMap&) = delete;
+  ValueMap& operator=(const ValueMap&) = delete;
 public:
   typedef KeyT key_type;
   typedef ValueT mapped_type;
@@ -90,11 +99,31 @@ public:
   typedef unsigned size_type;
 
   explicit ValueMap(unsigned NumInitBuckets = 64)
-    : Map(NumInitBuckets), Data() {}
+      : Map(NumInitBuckets), Data() {}
   explicit ValueMap(const ExtraData &Data, unsigned NumInitBuckets = 64)
-    : Map(NumInitBuckets), Data(Data) {}
+      : Map(NumInitBuckets), Data(Data) {}
 
-  ~ValueMap() {}
+  bool hasMD() const { return bool(MDMap); }
+  MDMapT &MD() {
+    if (!MDMap)
+      MDMap.emplace();
+    return *MDMap;
+  }
+  Optional<MDMapT> &getMDMap() { return MDMap; }
+
+  bool mayMapMetadata() const { return MayMapMetadata; }
+  void enableMapMetadata() { MayMapMetadata = true; }
+  void disableMapMetadata() { MayMapMetadata = false; }
+
+  /// Get the mapped metadata, if it's in the map.
+  Optional<Metadata *> getMappedMD(const Metadata *MD) const {
+    if (!MDMap)
+      return None;
+    auto Where = MDMap->find(MD);
+    if (Where == MDMap->end())
+      return None;
+    return Where->second.get();
+  }
 
   typedef ValueMapIterator<MapT, KeyT> iterator;
   typedef ValueMapConstIterator<MapT, KeyT> const_iterator;
@@ -109,7 +138,10 @@ public:
   /// Grow the map so that it has at least Size buckets. Does not shrink
   void resize(size_t Size) { Map.resize(Size); }
 
-  void clear() { Map.clear(); }
+  void clear() {
+    Map.clear();
+    MDMap.reset();
+  }
 
   /// Return 1 if the specified key is in the map, 0 otherwise.
   size_type count(const KeyT &Val) const {
@@ -134,9 +166,14 @@ public:
   // If the key is already in the map, it returns false and doesn't update the
   // value.
   std::pair<iterator, bool> insert(const std::pair<KeyT, ValueT> &KV) {
-    std::pair<typename MapT::iterator, bool> map_result=
-      Map.insert(std::make_pair(Wrap(KV.first), KV.second));
-    return std::make_pair(iterator(map_result.first), map_result.second);
+    auto MapResult = Map.insert(std::make_pair(Wrap(KV.first), KV.second));
+    return std::make_pair(iterator(MapResult.first), MapResult.second);
+  }
+
+  std::pair<iterator, bool> insert(std::pair<KeyT, ValueT> &&KV) {
+    auto MapResult =
+        Map.insert(std::make_pair(Wrap(KV.first), std::move(KV.second)));
+    return std::make_pair(iterator(MapResult.first), MapResult.second);
   }
 
   /// insert - Range insertion of pairs.
@@ -196,8 +233,8 @@ private:
 
 // This CallbackVH updates its ValueMap when the contained Value changes,
 // according to the user's preferences expressed through the Config object.
-template<typename KeyT, typename ValueT, typename Config>
-class ValueMapCallbackVH : public CallbackVH {
+template <typename KeyT, typename ValueT, typename Config>
+class ValueMapCallbackVH final : public CallbackVH {
   friend class ValueMap<KeyT, ValueT, Config>;
   friend struct DenseMapInfo<ValueMapCallbackVH>;
   typedef ValueMap<KeyT, ValueT, Config> ValueMapT;
@@ -209,6 +246,9 @@ class ValueMapCallbackVH : public CallbackVH {
       : CallbackVH(const_cast<Value*>(static_cast<const Value*>(Key))),
         Map(Map) {}
 
+  // Private constructor used to create empty/tombstone DenseMap keys.
+  ValueMapCallbackVH(Value *V) : CallbackVH(V), Map(nullptr) {}
+
 public:
   KeyT Unwrap() const { return cast_or_null<KeySansPointerT>(getValPtr()); }
 
@@ -216,12 +256,11 @@ public:
     // Make a copy that won't get changed even when *this is destroyed.
     ValueMapCallbackVH Copy(*this);
     typename Config::mutex_type *M = Config::getMutex(Copy.Map->Data);
+    unique_lock<typename Config::mutex_type> Guard;
     if (M)
-      M->acquire();
+      Guard = unique_lock<typename Config::mutex_type>(*M);
     Config::onDelete(Copy.Map->Data, Copy.Unwrap());  // May destroy *this.
     Copy.Map->Map.erase(Copy);  // Definitely destroys *this.
-    if (M)
-      M->release();
   }
   void allUsesReplacedWith(Value *new_key) override {
     assert(isa<KeySansPointerT>(new_key) &&
@@ -229,8 +268,9 @@ public:
     // Make a copy that won't get changed even when *this is destroyed.
     ValueMapCallbackVH Copy(*this);
     typename Config::mutex_type *M = Config::getMutex(Copy.Map->Data);
+    unique_lock<typename Config::mutex_type> Guard;
     if (M)
-      M->acquire();
+      Guard = unique_lock<typename Config::mutex_type>(*M);
 
     KeyT typed_new_key = cast<KeySansPointerT>(new_key);
     // Can destroy *this:
@@ -240,32 +280,29 @@ public:
       // I could == Copy.Map->Map.end() if the onRAUW callback already
       // removed the old mapping.
       if (I != Copy.Map->Map.end()) {
-        ValueT Target(I->second);
+        ValueT Target(std::move(I->second));
         Copy.Map->Map.erase(I);  // Definitely destroys *this.
-        Copy.Map->insert(std::make_pair(typed_new_key, Target));
+        Copy.Map->insert(std::make_pair(typed_new_key, std::move(Target)));
       }
     }
-    if (M)
-      M->release();
   }
 };
 
 template<typename KeyT, typename ValueT, typename Config>
 struct DenseMapInfo<ValueMapCallbackVH<KeyT, ValueT, Config> > {
   typedef ValueMapCallbackVH<KeyT, ValueT, Config> VH;
-  typedef DenseMapInfo<KeyT> PointerInfo;
 
   static inline VH getEmptyKey() {
-    return VH(PointerInfo::getEmptyKey(), nullptr);
+    return VH(DenseMapInfo<Value *>::getEmptyKey());
   }
   static inline VH getTombstoneKey() {
-    return VH(PointerInfo::getTombstoneKey(), nullptr);
+    return VH(DenseMapInfo<Value *>::getTombstoneKey());
   }
   static unsigned getHashValue(const VH &Val) {
-    return PointerInfo::getHashValue(Val.Unwrap());
+    return DenseMapInfo<KeyT>::getHashValue(Val.Unwrap());
   }
   static unsigned getHashValue(const KeyT &Val) {
-    return PointerInfo::getHashValue(Val);
+    return DenseMapInfo<KeyT>::getHashValue(Val);
   }
   static bool isEqual(const VH &LHS, const VH &RHS) {
     return LHS == RHS;

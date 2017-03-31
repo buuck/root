@@ -4,11 +4,10 @@
 #include "PyROOT.h"
 #include "TSetItemHolder.h"
 #include "Executors.h"
-#include "Adapters.h"
 
 
 //- protected members --------------------------------------------------------
-Bool_t PyROOT::TSetItemHolder::InitExecutor_( TExecutor*& executor )
+Bool_t PyROOT::TSetItemHolder::InitExecutor_( TExecutor*& executor, TCallContext* )
 {
 // basic call will do
    if ( ! TMethodHolder::InitExecutor_( executor ) )
@@ -18,7 +17,7 @@ Bool_t PyROOT::TSetItemHolder::InitExecutor_( TExecutor*& executor )
    if ( ! dynamic_cast< TRefExecutor* >( executor ) ) {
       PyErr_Format( PyExc_NotImplementedError,
          "no __setitem__ handler for return type (%s)",
-         this->GetMethod().TypeOf().ReturnType().Name( Rflx::QUALIFIED | Rflx::SCOPED ).c_str() );
+         this->GetReturnTypeName().c_str() );
       return kFALSE;
    }
 
@@ -26,19 +25,12 @@ Bool_t PyROOT::TSetItemHolder::InitExecutor_( TExecutor*& executor )
 }
 
 
-//- constructor --------------------------------------------------------------
-PyROOT::TSetItemHolder::TSetItemHolder( const TScopeAdapter& klass, const TMemberAdapter& method ) :
-      TMethodHolder( klass, method )
-{
-}
+////////////////////////////////////////////////////////////////////////////////
+/// Prepare executor with a buffer for the return value.
 
-
-//____________________________________________________________________________
-PyObject* PyROOT::TSetItemHolder::FilterArgs(
+PyObject* PyROOT::TSetItemHolder::PreProcessArgs(
       ObjectProxy*& self, PyObject* args, PyObject* kwds )
 {
-// Prepare executor with a buffer for the return value.
-
    int nArgs = PyTuple_GET_SIZE( args );
    if ( nArgs <= 1 ) {
       PyErr_SetString( PyExc_TypeError, "insufficient arguments to __setitem__" );
@@ -78,7 +70,7 @@ PyObject* PyROOT::TSetItemHolder::FilterArgs(
    }
 
 // actual call into C++
-   PyObject* result = TMethodHolder::FilterArgs( self, unrolled ? unrolled : subset, kwds );
+   PyObject* result = TMethodHolder::PreProcessArgs( self, unrolled ? unrolled : subset, kwds );
    Py_XDECREF( unrolled );
    Py_DECREF( subset );
    return result;

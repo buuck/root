@@ -7,12 +7,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_TARGET_NVPTX_TARGETOBJECTFILE_H
-#define LLVM_TARGET_NVPTX_TARGETOBJECTFILE_H
+#ifndef LLVM_LIB_TARGET_NVPTX_NVPTXTARGETOBJECTFILE_H
+#define LLVM_LIB_TARGET_NVPTX_NVPTXTARGETOBJECTFILE_H
 
 #include "NVPTXSection.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
-#include <string>
 
 namespace llvm {
 class GlobalVariable;
@@ -41,7 +40,7 @@ public:
     DwarfLocSection = nullptr;
     DwarfARangesSection = nullptr;
     DwarfRangesSection = nullptr;
-    DwarfMacroInfoSection = nullptr;
+    DwarfMacinfoSection = nullptr;
   }
 
   virtual ~NVPTXTargetObjectFile();
@@ -49,8 +48,7 @@ public:
   void Initialize(MCContext &ctx, const TargetMachine &TM) override {
     TargetLoweringObjectFile::Initialize(ctx, TM);
     TextSection = new NVPTXSection(MCSection::SV_ELF, SectionKind::getText());
-    DataSection =
-        new NVPTXSection(MCSection::SV_ELF, SectionKind::getDataRel());
+    DataSection = new NVPTXSection(MCSection::SV_ELF, SectionKind::getData());
     BSSSection = new NVPTXSection(MCSection::SV_ELF, SectionKind::getBSS());
     ReadOnlySection =
         new NVPTXSection(MCSection::SV_ELF, SectionKind::getReadOnly());
@@ -83,21 +81,25 @@ public:
         new NVPTXSection(MCSection::SV_ELF, SectionKind::getMetadata());
     DwarfRangesSection =
         new NVPTXSection(MCSection::SV_ELF, SectionKind::getMetadata());
-    DwarfMacroInfoSection =
+    DwarfMacinfoSection =
         new NVPTXSection(MCSection::SV_ELF, SectionKind::getMetadata());
   }
 
-  const MCSection *getSectionForConstant(SectionKind Kind,
-                                         const Constant *C) const override {
+  MCSection *getSectionForConstant(const DataLayout &DL, SectionKind Kind,
+                                   const Constant *C,
+                                   unsigned &Align) const override {
     return ReadOnlySection;
   }
 
-  const MCSection *getExplicitSectionGlobal(const GlobalValue *GV,
-                                       SectionKind Kind, Mangler &Mang,
-                                       const TargetMachine &TM) const override {
+  MCSection *getExplicitSectionGlobal(const GlobalValue *GV, SectionKind Kind,
+                                      Mangler &Mang,
+                                      const TargetMachine &TM) const override {
     return DataSection;
   }
 
+  MCSection *SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
+                                    Mangler &Mang,
+                                    const TargetMachine &TM) const override;
 };
 
 } // end namespace llvm

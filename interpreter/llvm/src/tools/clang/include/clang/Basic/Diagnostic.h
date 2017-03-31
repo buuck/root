@@ -12,12 +12,13 @@
 ///
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_CLANG_DIAGNOSTIC_H
-#define LLVM_CLANG_DIAGNOSTIC_H
+#ifndef LLVM_CLANG_BASIC_DIAGNOSTIC_H
+#define LLVM_CLANG_BASIC_DIAGNOSTIC_H
 
 #include "clang/Basic/DiagnosticIDs.h"
 #include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Basic/SourceLocation.h"
+#include "clang/Basic/Specifiers.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
@@ -132,8 +133,8 @@ public:
 /// the user. DiagnosticsEngine is tied to one translation unit and one
 /// SourceManager.
 class DiagnosticsEngine : public RefCountedBase<DiagnosticsEngine> {
-  DiagnosticsEngine(const DiagnosticsEngine &) LLVM_DELETED_FUNCTION;
-  void operator=(const DiagnosticsEngine &) LLVM_DELETED_FUNCTION;
+  DiagnosticsEngine(const DiagnosticsEngine &) = delete;
+  void operator=(const DiagnosticsEngine &) = delete;
 
 public:
   /// \brief The level of the diagnostic, after it has been through mapping.
@@ -172,6 +173,7 @@ private:
   bool WarningsAsErrors;         // Treat warnings like errors.
   bool EnableAllWarnings;        // Enable all warnings.
   bool ErrorsAsFatal;            // Treat errors like fatal errors.
+  bool FatalsAsError;             // Treat fatal errors like errors.
   bool SuppressSystemWarnings;   // Suppress warnings in system headers.
   bool SuppressAllDiagnostics;   // Suppress all diagnostics.
   bool ElideType;                // Elide common types of templates.
@@ -187,7 +189,7 @@ private:
   IntrusiveRefCntPtr<DiagnosticIDs> Diags;
   IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts;
   DiagnosticConsumer *Client;
-  bool OwnsDiagClient;
+  std::unique_ptr<DiagnosticConsumer> Owner;
   SourceManager *SourceMgr;
 
   /// \brief Mapping information for diagnostics.
@@ -302,7 +304,6 @@ private:
 
   unsigned NumWarnings;         ///< Number of warnings reported
   unsigned NumErrors;           ///< Number of errors reported
-  unsigned NumErrorsSuppressed; ///< Number of errors suppressed
 
   /// \brief A function pointer that converts an opaque diagnostic
   /// argument to a strings.
@@ -369,14 +370,11 @@ public:
   const DiagnosticConsumer *getClient() const { return Client; }
 
   /// \brief Determine whether this \c DiagnosticsEngine object own its client.
-  bool ownsClient() const { return OwnsDiagClient; }
-  
+  bool ownsClient() const { return Owner != nullptr; }
+
   /// \brief Return the current diagnostic client along with ownership of that
   /// client.
-  DiagnosticConsumer *takeClient() {
-    OwnsDiagClient = false;
-    return Client;
-  }
+  std::unique_ptr<DiagnosticConsumer> takeClient() { return std::move(Owner); }
 
   bool hasSourceManager() const { return SourceMgr != nullptr; }
   SourceManager &getSourceManager() const {
@@ -457,6 +455,12 @@ public:
   /// \brief When set to true, any error reported is made a fatal error.
   void setErrorsAsFatal(bool Val) { ErrorsAsFatal = Val; }
   bool getErrorsAsFatal() const { return ErrorsAsFatal; }
+
+  /// \brief When set to true, any fatal error reported is made an error.
+  ///
+  /// This setting takes precedence over the setErrorsAsFatal setting above.
+  void setFatalsAsError(bool Val) { FatalsAsError = Val; }
+  bool getFatalsAsError() const { return FatalsAsError; }
 
   /// \brief When set to true mask warnings that come from system headers.
   void setSuppressSystemWarnings(bool Val) { SuppressSystemWarnings = Val; }
@@ -542,9 +546,13 @@ public:
   /// \returns true (and ignores the request) if "Group" was unknown, false
   /// otherwise.
   ///
+  /// \param Flavor The flavor of group to affect. -Rfoo does not affect the
+  /// state of the -Wfoo group and vice versa.
+  ///
   /// \param Loc The source location that this change of diagnostic state should
   /// take affect. It can be null if we are setting the state from command-line.
-  bool setSeverityForGroup(StringRef Group, diag::Severity Map,
+  bool setSeverityForGroup(diag::Flavor Flavor, StringRef Group,
+                           diag::Severity Map,
                            SourceLocation Loc = SourceLocation());
 
   /// \brief Set the warning-as-error flag for the given diagnostic group.
@@ -561,11 +569,12 @@ public:
   /// \returns True if the given group is unknown, false otherwise.
   bool setDiagnosticGroupErrorAsFatal(StringRef Group, bool Enabled);
 
-  /// \brief Add the specified mapping to all diagnostics.
+  /// \brief Add the specified mapping to all diagnostics of the specified
+  /// flavor.
   ///
   /// Mainly to be used by -Wno-everything to disable all warnings but allow
   /// subsequent -W options to enable specific warnings.
-  void setSeverityForAll(diag::Severity Map,
+  void setSeverityForAll(diag::Flavor Flavor, diag::Severity Map,
                          SourceLocation Loc = SourceLocation());
 
   bool hasErrorOccurred() const { return ErrorOccurred; }
@@ -863,28 +872,27 @@ public:
 /// the common fields to registers, eliminating increments of the NumArgs field,
 /// for example.
 class DiagnosticBuilder {
-  mutable DiagnosticsEngine *DiagObj;
-  mutable unsigned NumArgs;
+  mutable DiagnosticsEngine *DiagObj = nullptr;
+  mutable unsigned NumArgs = 0;
 
   /// \brief Status variable indicating if this diagnostic is still active.
   ///
   // NOTE: This field is redundant with DiagObj (IsActive iff (DiagObj == 0)),
   // but LLVM is not currently smart enough to eliminate the null check that
   // Emit() would end up with if we used that as our status variable.
-  mutable bool IsActive;
+  mutable bool IsActive = false;
 
   /// \brief Flag indicating that this diagnostic is being emitted via a
   /// call to ForceEmit.
-  mutable bool IsForceEmit;
+  mutable bool IsForceEmit = false;
 
-  void operator=(const DiagnosticBuilder &) LLVM_DELETED_FUNCTION;
+  void operator=(const DiagnosticBuilder &) = delete;
   friend class DiagnosticsEngine;
 
-  DiagnosticBuilder()
-      : DiagObj(nullptr), NumArgs(0), IsActive(false), IsForceEmit(false) {}
+  DiagnosticBuilder() = default;
 
   explicit DiagnosticBuilder(DiagnosticsEngine *diagObj)
-      : DiagObj(diagObj), NumArgs(0), IsActive(true), IsForceEmit(false) {
+      : DiagObj(diagObj), IsActive(true) {
     assert(diagObj && "DiagnosticBuilder requires a valid DiagnosticsEngine!");
     diagObj->DiagRanges.clear();
     diagObj->DiagFixItHints.clear();
@@ -991,7 +999,8 @@ public:
 
   void AddFixItHint(const FixItHint &Hint) const {
     assert(isActive() && "Clients must not add to cleared diagnostic!");
-    DiagObj->DiagFixItHints.push_back(Hint);
+    if (!Hint.isNull())
+      DiagObj->DiagFixItHints.push_back(Hint);
   }
 
   void addFlagValue(StringRef V) const { DiagObj->FlagValue = V; }
@@ -1064,10 +1073,10 @@ inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
 // so that we only match those arguments that are (statically) DeclContexts;
 // other arguments that derive from DeclContext (e.g., RecordDecls) will not
 // match.
-template<typename T>
-inline
-typename std::enable_if<std::is_same<T, DeclContext>::value,
-                        const DiagnosticBuilder &>::type
+template <typename T>
+inline typename std::enable_if<
+    std::is_same<typename std::remove_const<T>::type, DeclContext>::value,
+    const DiagnosticBuilder &>::type
 operator<<(const DiagnosticBuilder &DB, T *DC) {
   DB.AddTaggedVal(reinterpret_cast<intptr_t>(DC),
                   DiagnosticsEngine::ak_declcontext);
@@ -1075,14 +1084,14 @@ operator<<(const DiagnosticBuilder &DB, T *DC) {
 }
 
 inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
-                                           const SourceRange &R) {
+                                           SourceRange R) {
   DB.AddSourceRange(CharSourceRange::getTokenRange(R));
   return DB;
 }
 
 inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
                                            ArrayRef<SourceRange> Ranges) {
-  for (const SourceRange &R: Ranges)
+  for (SourceRange R : Ranges)
     DB.AddSourceRange(CharSourceRange::getTokenRange(R));
   return DB;
 }
@@ -1095,10 +1104,23 @@ inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
 
 inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
                                            const FixItHint &Hint) {
-  if (!Hint.isNull())
+  DB.AddFixItHint(Hint);
+  return DB;
+}
+
+inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
+                                           ArrayRef<FixItHint> Hints) {
+  for (const FixItHint &Hint : Hints)
     DB.AddFixItHint(Hint);
   return DB;
 }
+
+/// A nullability kind paired with a bit indicating whether it used a
+/// context-sensitive keyword.
+typedef std::pair<NullabilityKind, bool> DiagNullabilityKind;
+
+const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
+                                    DiagNullabilityKind nullability);
 
 inline DiagnosticBuilder DiagnosticsEngine::Report(SourceLocation Loc,
                                                    unsigned DiagID) {
@@ -1249,7 +1271,7 @@ class StoredDiagnostic {
   std::vector<FixItHint> FixIts;
 
 public:
-  StoredDiagnostic();
+  StoredDiagnostic() = default;
   StoredDiagnostic(DiagnosticsEngine::Level Level, const Diagnostic &Info);
   StoredDiagnostic(DiagnosticsEngine::Level Level, unsigned ID, 
                    StringRef Message);
@@ -1257,10 +1279,9 @@ public:
                    StringRef Message, FullSourceLoc Loc,
                    ArrayRef<CharSourceRange> Ranges,
                    ArrayRef<FixItHint> Fixits);
-  ~StoredDiagnostic();
 
   /// \brief Evaluates true when this object stores a diagnostic.
-  LLVM_EXPLICIT operator bool() const { return Message.size() > 0; }
+  explicit operator bool() const { return Message.size() > 0; }
 
   unsigned getID() const { return ID; }
   DiagnosticsEngine::Level getLevel() const { return Level; }
@@ -1364,7 +1385,7 @@ class ForwardingDiagnosticConsumer : public DiagnosticConsumer {
 public:
   ForwardingDiagnosticConsumer(DiagnosticConsumer &Target) : Target(Target) {}
 
-  virtual ~ForwardingDiagnosticConsumer();
+  ~ForwardingDiagnosticConsumer() override;
 
   void HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
                         const Diagnostic &Info) override;

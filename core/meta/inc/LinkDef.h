@@ -32,10 +32,10 @@
 #pragma link C++ class TEnum+;
 #pragma link C++ class TFunction;
 #pragma link C++ class TFunctionTemplate+;
-#pragma link C++ class ROOT::TSchemaMatch+;
+#pragma link C++ class ROOT::Internal::TSchemaMatch+;
 #pragma link C++ class ROOT::TSchemaRule+;
 #pragma link C++ class ROOT::TSchemaRule::TSources+;
-#pragma link C++ class ROOT::TSchemaRuleSet-;
+#pragma link C++ class ROOT::Detail::TSchemaRuleSet-;
 #pragma link C++ class TGlobal;
 #pragma link C++ class TMethod;
 #pragma link C++ class TMethodArg;
@@ -66,9 +66,12 @@
 #pragma link C++ class std::vector<std::pair<Int_t, Int_t> >+;
 #pragma link C++ class TFileMergeInfo;
 #pragma link C++ class TListOfFunctions+;
+#pragma link C++ class TListOfFunctionsIter;
 #pragma link C++ class TListOfFunctionTemplates+;
 #pragma link C++ class TListOfDataMembers-;
 #pragma link C++ class TListOfEnums+;
+#pragma link C++ class TListOfEnumsWithLock+;
+#pragma link C++ class TListOfEnumsWithLockIter;
 //for new protoclasses
 #pragma link C++ class std::vector<TDataMember * >+;
 #pragma link C++ class std::vector<TProtoClass::TProtoRealData >+;

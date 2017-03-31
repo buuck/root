@@ -27,12 +27,12 @@
 
 ClassImp(TGCommandPlugin)
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// TGCommandPlugin Constructor.
+
 TGCommandPlugin::TGCommandPlugin(const TGWindow *p, UInt_t w, UInt_t h) :
       TGMainFrame(p, w, h)
 {
-   // TGCommandPlugin Constructor.
-
    SetCleanup(kDeepCleanup);
    fHf = new TGHorizontalFrame(this, 100, 20);
    fComboCmd   = new TGComboBox(fHf, "", 1);
@@ -48,12 +48,13 @@ TGCommandPlugin::TGCommandPlugin(const TGWindow *p, UInt_t w, UInt_t h) :
             kLHintsExpandX, 3, 3, 3, 3));
    fCommand->Connect("ReturnPressed()", "TGCommandPlugin", this,
                      "HandleCommand()");
-
-   Pixel_t pxl;
-   gClient->GetColorByName("#3399ff", pxl);
    fStatus = new TGTextView(this, 10, 100, 1);
-   fStatus->SetSelectBack(pxl);
-   fStatus->SetSelectFore(TGFrame::GetWhitePixel());
+   if (gClient->GetStyle() < 2) {
+      Pixel_t pxl;
+      gClient->GetColorByName("#a0a0a0", pxl);
+      fStatus->SetSelectBack(pxl);
+      fStatus->SetSelectFore(TGFrame::GetWhitePixel());
+   }
    AddFrame(fStatus, new TGLayoutHints(kLHintsLeft | kLHintsTop |
             kLHintsExpandX | kLHintsExpandY, 3, 3, 3, 3));
    fPid = gSystem->GetPid();
@@ -76,11 +77,11 @@ TGCommandPlugin::TGCommandPlugin(const TGWindow *p, UInt_t w, UInt_t h) :
    MapWindow();
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Destructor.
+
 TGCommandPlugin::~TGCommandPlugin()
 {
-   // Destructor.
-
    TString pathtmp = TString::Format("%s/command.%d.log",
                                      gSystem->TempDirectory(), fPid);
    gSystem->Unlink(pathtmp);
@@ -88,11 +89,11 @@ TGCommandPlugin::~TGCommandPlugin()
    Cleanup();
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Check if actual ROOT session is a remote one or a local one.
+
 void TGCommandPlugin::CheckRemote(const char * /*str*/)
 {
-   // Check if actual ROOT session is a remote one or a local one.
-
    Pixel_t pxl;
    TApplication *app = gROOT->GetApplication();
    if (!app->InheritsFrom("TRint"))
@@ -115,11 +116,11 @@ void TGCommandPlugin::CheckRemote(const char * /*str*/)
    fHf->Layout();
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Handle command line from the "command" combo box.
+
 void TGCommandPlugin::HandleCommand()
 {
-   // Handle command line from the "command" combo box.
-
    const char *string = fCommandBuf->GetString();
    if (strlen(string) > 1) {
       // form temporary file path
@@ -148,11 +149,11 @@ void TGCommandPlugin::HandleCommand()
    }
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Handle timer event.
+
 Bool_t TGCommandPlugin::HandleTimer(TTimer *t)
 {
-   // Handle timer event.
-
    if (t != fTimer) return kTRUE;
    CheckRemote("");
    return kTRUE;

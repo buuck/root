@@ -12,15 +12,9 @@
 #ifndef ROOT_TXMLFile
 #define ROOT_TXMLFile
 
-#ifndef ROOT_TXMLEngine
 #include "TXMLEngine.h"
-#endif
-#ifndef ROOT_TFile
 #include "TFile.h"
-#endif
-#ifndef ROOT_TXMLSetup
 #include "TXMLSetup.h"
-#endif
 
 
 class TKeyXML;
@@ -147,7 +141,7 @@ protected:
 
    Long64_t          fKeyCounter;           //! counter of created keys, used for keys id
 
-ClassDef(TXMLFile, 2)  //ROOT file in XML format
+ClassDef(TXMLFile, 3)  //ROOT file in XML format
 };
 
 

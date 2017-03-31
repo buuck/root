@@ -12,8 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef TARGET_AArch64_H
-#define TARGET_AArch64_H
+#ifndef LLVM_LIB_TARGET_AARCH64_AARCH64_H
+#define LLVM_LIB_TARGET_AARCH64_AARCH64_H
 
 #include "MCTargetDesc/AArch64MCTargetDesc.h"
 #include "Utils/AArch64BaseInfo.h"
@@ -27,6 +27,7 @@ class FunctionPass;
 class MachineFunctionPass;
 
 FunctionPass *createAArch64DeadRegisterDefinitions();
+FunctionPass *createAArch64RedundantCopyEliminationPass();
 FunctionPass *createAArch64ConditionalCompares();
 FunctionPass *createAArch64AdvSIMDScalar();
 FunctionPass *createAArch64BranchRelaxation();
@@ -36,14 +37,16 @@ FunctionPass *createAArch64StorePairSuppressPass();
 FunctionPass *createAArch64ExpandPseudoPass();
 FunctionPass *createAArch64LoadStoreOptimizationPass();
 ModulePass *createAArch64PromoteConstantPass();
+FunctionPass *createAArch64ConditionOptimizerPass();
 FunctionPass *createAArch64AddressTypePromotionPass();
-/// \brief Creates an ARM-specific Target Transformation Info pass.
-ImmutablePass *
-createAArch64TargetTransformInfoPass(const AArch64TargetMachine *TM);
+FunctionPass *createAArch64A57FPLoadBalancing();
+FunctionPass *createAArch64A53Fix835769();
 
 FunctionPass *createAArch64CleanupLocalDynamicTLSPass();
 
 FunctionPass *createAArch64CollectLOHPass();
+
+void initializeAArch64ExpandPseudoPass(PassRegistry&);
 } // end namespace llvm
 
 #endif

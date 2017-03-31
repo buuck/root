@@ -32,9 +32,11 @@ if ! [ -f $rootdir/$allheaders ]; then
         echo 'Neither ./'$allheaders' nor $ROOTSYS/'$allheaders' exists!' >& 2
         exit 1
     fi
+else
+    rootbuild=-rootbuild
 fi
 
-cxxflags="-D__CLING__ -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -DROOT_PCH -I$rootdir/include -I$rootdir/etc -I$rootdir/$cfgdir -I$rootdir/etc/cling `cat $rootdir/$cppflags`"
+cxxflags="-pthread -D__CLING__ -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -DROOT_PCH -I$rootdir/include -I$rootdir/etc -I$rootdir/$cfgdir -I$rootdir/etc/cling `cat $rootdir/$cppflags`"
 
 if ! [ "x$1" = "x" ]; then
     cxxflags="$cxxflags $1"
@@ -42,7 +44,8 @@ fi
 
 # generate pch
 touch allDict.cxx.h
-$rootdir/bin/rootcling -1 -f allDict.cxx -noDictSelection -c $cxxflags $allheaders $@ $alllinkdefs
+echo $rootdir/bin/rootcling $rootbuild -1 -f allDict.cxx -noDictSelection -c $cxxflags $allheaders $@ $alllinkdefs
+$rootdir/bin/rootcling $rootbuild -1 -f allDict.cxx -noDictSelection -c $cxxflags $allheaders $@ $alllinkdefs
 res=$?
 if [ $res -eq 0 ] ; then
   mv allDict_rdict.pch $pch

@@ -16,8 +16,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_CLANG_GR_EXPLODEDGRAPH
-#define LLVM_CLANG_GR_EXPLODEDGRAPH
+#ifndef LLVM_CLANG_STATICANALYZER_CORE_PATHSENSITIVE_EXPLODEDGRAPH_H
+#define LLVM_CLANG_STATICANALYZER_CORE_PATHSENSITIVE_EXPLODEDGRAPH_H
 
 #include "clang/AST/Decl.h"
 #include "clang/Analysis/AnalysisContext.h"
@@ -32,6 +32,7 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Casting.h"
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace clang {
@@ -121,14 +122,11 @@ class ExplodedNode : public llvm::FoldingSetNode {
   NodeGroup Succs;
 
 public:
-
   explicit ExplodedNode(const ProgramPoint &loc, ProgramStateRef state,
                         bool IsSink)
-    : Location(loc), State(state), Succs(IsSink) {
+      : Location(loc), State(std::move(state)), Succs(IsSink) {
     assert(isSink() == IsSink);
   }
-  
-  ~ExplodedNode() {}
 
   /// getLocation - Returns the edge associated with the given node.
   ProgramPoint getLocation() const { return Location; }
@@ -297,8 +295,16 @@ public:
                         bool IsSink = false,
                         bool* IsNew = nullptr);
 
-  ExplodedGraph* MakeEmptyGraph() const {
-    return new ExplodedGraph();
+  /// \brief Create a node for a (Location, State) pair,
+  ///  but don't store it for deduplication later.  This
+  ///  is useful when copying an already completed
+  ///  ExplodedGraph for further processing.
+  ExplodedNode *createUncachedNode(const ProgramPoint &L,
+    ProgramStateRef State,
+    bool IsSink = false);
+
+  std::unique_ptr<ExplodedGraph> MakeEmptyGraph() const {
+    return llvm::make_unique<ExplodedGraph>();
   }
 
   /// addRoot - Add an untyped node to the set of roots.
@@ -322,6 +328,8 @@ public:
 
   bool empty() const { return NumNodes == 0; }
   unsigned size() const { return NumNodes; }
+
+  void reserve(unsigned NodeCount) { Nodes.reserve(NodeCount); }
 
   // Iterators.
   typedef ExplodedNode                        NodeTy;
@@ -372,9 +380,10 @@ public:
   /// \param[out] InverseMap An optional map from nodes in the returned graph to
   ///                        nodes in this graph.
   /// \returns The trimmed graph
-  ExplodedGraph *trim(ArrayRef<const NodeTy *> Nodes,
-                      InterExplodedGraphMap *ForwardMap = nullptr,
-                      InterExplodedGraphMap *InverseMap = nullptr) const;
+  std::unique_ptr<ExplodedGraph>
+  trim(ArrayRef<const NodeTy *> Nodes,
+       InterExplodedGraphMap *ForwardMap = nullptr,
+       InterExplodedGraphMap *InverseMap = nullptr) const;
 
   /// Enable tracking of recently allocated nodes for potential reclamation
   /// when calling reclaimRecentlyAllocatedNodes().

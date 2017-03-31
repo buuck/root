@@ -10,8 +10,8 @@
 // This file defines the interface of a subengine of the CoreEngine.
 //
 //===----------------------------------------------------------------------===//
-#ifndef LLVM_CLANG_GR_SUBENGINE_H
-#define LLVM_CLANG_GR_SUBENGINE_H
+#ifndef LLVM_CLANG_STATICANALYZER_CORE_PATHSENSITIVE_SUBENGINE_H
+#define LLVM_CLANG_STATICANALYZER_CORE_PATHSENSITIVE_SUBENGINE_H
 
 #include "clang/Analysis/ProgramPoint.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/SVals.h"
@@ -72,6 +72,16 @@ public:
                              const CFGBlock *DstT,
                              const CFGBlock *DstF) = 0;
 
+  /// Called by CoreEngine.
+  /// Used to generate successor nodes for temporary destructors depending
+  /// on whether the corresponding constructor was visited.
+  virtual void processCleanupTemporaryBranch(const CXXBindTemporaryExpr *BTE,
+                                             NodeBuilderContext &BldCtx,
+                                             ExplodedNode *Pred,
+                                             ExplodedNodeSet &Dst,
+                                             const CFGBlock *DstT,
+                                             const CFGBlock *DstF) = 0;
+
   /// Called by CoreEngine.  Used to processing branching behavior
   /// at static initalizers.
   virtual void processStaticInitializer(const DeclStmt *DS,
@@ -89,13 +99,21 @@ public:
   /// nodes by processing the 'effects' of a switch statement.
   virtual void processSwitch(SwitchNodeBuilder& builder) = 0;
 
-  /// Called by CoreEngine.  Used to generate end-of-path
-  /// nodes when the control reaches the end of a function.
+  /// Called by CoreEngine.  Used to notify checkers that processing a
+  /// function has begun. Called for both inlined and and top-level functions.
+  virtual void processBeginOfFunction(NodeBuilderContext &BC,
+                                      ExplodedNode *Pred,
+                                      ExplodedNodeSet &Dst,
+                                      const BlockEdge &L) = 0;
+
+  /// Called by CoreEngine.  Used to notify checkers that processing a
+  /// function has ended. Called for both inlined and and top-level functions.
   virtual void processEndOfFunction(NodeBuilderContext& BC,
                                     ExplodedNode *Pred) = 0;
 
   // Generate the entry node of the callee.
-  virtual void processCallEnter(CallEnter CE, ExplodedNode *Pred) = 0;
+  virtual void processCallEnter(NodeBuilderContext& BC, CallEnter CE,
+                                ExplodedNode *Pred) = 0;
 
   // Generate the first post callsite node.
   virtual void processCallExit(ExplodedNode *Pred) = 0;

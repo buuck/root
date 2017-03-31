@@ -36,6 +36,7 @@
 #include "clang/Sema/ParsedTemplate.h"
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/ScopeInfo.h"
+#include "clang/Sema/Template.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include <map>
@@ -72,8 +73,8 @@ namespace {
   /// VisitExpr - Visit all of the children of this expression.
   bool CheckDefaultArgumentVisitor::VisitExpr(Expr *Node) {
     bool IsInvalid = false;
-    for (Stmt::child_range I = Node->children(); I; ++I)
-      IsInvalid |= Visit(*I);
+    for (Stmt *SubStmt : Node->children())
+      IsInvalid |= Visit(SubStmt);
     return IsInvalid;
   }
 
@@ -161,34 +162,31 @@ Sema::ImplicitExceptionSpecification::CalledDecl(SourceLocation CallLoc,
 
   ExceptionSpecificationType EST = Proto->getExceptionSpecType();
 
-  // If this function can throw any exceptions, make a note of that.
-  if (EST == EST_MSAny || EST == EST_None) {
-    ClearExceptions();
-    ComputedEST = EST;
-    return;
-  }
-
-  // FIXME: If the call to this decl is using any of its default arguments, we
-  // need to search them for potentially-throwing calls.
-
-  // If this function has a basic noexcept, it doesn't affect the outcome.
-  if (EST == EST_BasicNoexcept)
-    return;
-
   // If we have a throw-all spec at this point, ignore the function.
   if (ComputedEST == EST_None)
     return;
 
+  switch(EST) {
+  // If this function can throw any exceptions, make a note of that.
+  case EST_MSAny:
+  case EST_None:
+    ClearExceptions();
+    ComputedEST = EST;
+    return;
+  // FIXME: If the call to this decl is using any of its default arguments, we
+  // need to search them for potentially-throwing calls.
+  // If this function has a basic noexcept, it doesn't affect the outcome.
+  case EST_BasicNoexcept:
+    return;
   // If we're still at noexcept(true) and there's a nothrow() callee,
   // change to that specification.
-  if (EST == EST_DynamicNone) {
+  case EST_DynamicNone:
     if (ComputedEST == EST_BasicNoexcept)
       ComputedEST = EST_DynamicNone;
     return;
-  }
-
   // Check out noexcept specs.
-  if (EST == EST_ComputedNoexcept) {
+  case EST_ComputedNoexcept:
+  {
     FunctionProtoType::NoexceptResult NR =
         Proto->getNoexceptSpec(Self->Context);
     assert(NR != FunctionProtoType::NR_NoNoexcept &&
@@ -196,7 +194,6 @@ Sema::ImplicitExceptionSpecification::CalledDecl(SourceLocation CallLoc,
     assert(NR != FunctionProtoType::NR_Dependent &&
            "Should not generate implicit declarations for dependent cases, "
            "and don't know how to handle them anyway.");
-
     // noexcept(false) -> no spec on the new function
     if (NR == FunctionProtoType::NR_Throw) {
       ClearExceptions();
@@ -205,14 +202,16 @@ Sema::ImplicitExceptionSpecification::CalledDecl(SourceLocation CallLoc,
     // noexcept(true) won't change anything either.
     return;
   }
-
+  default:
+    break;
+  }
   assert(EST == EST_Dynamic && "EST case not considered earlier.");
   assert(ComputedEST != EST_None &&
          "Shouldn't collect exceptions when throw-all is guaranteed.");
   ComputedEST = EST_Dynamic;
   // Record the exceptions in this function's exception specification.
   for (const auto &E : Proto->exceptions())
-    if (ExceptionsSeen.insert(Self->Context.getCanonicalType(E)))
+    if (ExceptionsSeen.insert(Self->Context.getCanonicalType(E)).second)
       Exceptions.push_back(E);
 }
 
@@ -315,8 +314,17 @@ Sema::ActOnParamDefaultArgument(Decl *param, SourceLocation EqualLoc,
   if (DiagnoseUnexpandedParameterPack(DefaultArg, UPPC_DefaultArgument)) {
     Param->setInvalidDecl();
     return;
-  }    
-      
+  }
+
+  // C++11 [dcl.fct.default]p3
+  //   A default argument expression [...] shall not be specified for a
+  //   parameter pack.
+  if (Param->isParameterPack()) {
+    Diag(EqualLoc, diag::err_param_default_argument_on_parameter_pack)
+        << DefaultArg->getSourceRange();
+    return;
+  }
+
   // Check that the default argument is well-formed
   CheckDefaultArgumentVisitor DefaultArgChecker(DefaultArg, this);
   if (DefaultArgChecker.Visit(DefaultArg)) {
@@ -353,7 +361,9 @@ void Sema::ActOnParamDefaultArgumentError(Decl *param,
   Param->setInvalidDecl();
   UnparsedDefaultArgLocs.erase(Param);
   Param->setDefaultArg(new(Context)
-                       OpaqueValueExpr(EqualLoc, Param->getType(), VK_RValue));
+                       OpaqueValueExpr(EqualLoc,
+                                       Param->getType().getNonReferenceType(),
+                                       VK_RValue));
 }
 
 /// CheckExtraCXXDefaultArguments - Check for any extra default
@@ -385,9 +395,14 @@ void Sema::CheckExtraCXXDefaultArguments(Declarator &D) {
         ParmVarDecl *Param = cast<ParmVarDecl>(chunk.Fun.Params[argIdx].Param);
         if (Param->hasUnparsedDefaultArg()) {
           CachedTokens *Toks = chunk.Fun.Params[argIdx].DefaultArgTokens;
+          SourceRange SR;
+          if (Toks->size() > 1)
+            SR = SourceRange((*Toks)[1].getLocation(),
+                             Toks->back().getLocation());
+          else
+            SR = UnparsedDefaultArgLocs[Param];
           Diag(Param->getLocation(), diag::err_param_default_argument_nonfunc)
-            << SourceRange((*Toks)[1].getLocation(),
-                           Toks->back().getLocation());
+            << SR;
           delete Toks;
           chunk.Fun.Params[argIdx].DefaultArgTokens = nullptr;
         } else if (Param->getDefaultArg()) {
@@ -421,6 +436,45 @@ bool Sema::MergeCXXFunctionDecl(FunctionDecl *New, FunctionDecl *Old,
                                 Scope *S) {
   bool Invalid = false;
 
+  // The declaration context corresponding to the scope is the semantic
+  // parent, unless this is a local function declaration, in which case
+  // it is that surrounding function.
+  DeclContext *ScopeDC = New->isLocalExternDecl()
+                             ? New->getLexicalDeclContext()
+                             : New->getDeclContext();
+
+  // Find the previous declaration for the purpose of default arguments.
+  FunctionDecl *PrevForDefaultArgs = Old;
+  for (/**/; PrevForDefaultArgs;
+       // Don't bother looking back past the latest decl if this is a local
+       // extern declaration; nothing else could work.
+       PrevForDefaultArgs = New->isLocalExternDecl()
+                                ? nullptr
+                                : PrevForDefaultArgs->getPreviousDecl()) {
+    // Ignore hidden declarations.
+    if (!LookupResult::isVisible(*this, PrevForDefaultArgs))
+      continue;
+
+    if (S && !isDeclInScope(PrevForDefaultArgs, ScopeDC, S) &&
+        !New->isCXXClassMember()) {
+      // Ignore default arguments of old decl if they are not in
+      // the same scope and this is not an out-of-line definition of
+      // a member function.
+      continue;
+    }
+
+    if (PrevForDefaultArgs->isLocalExternDecl() != New->isLocalExternDecl()) {
+      // If only one of these is a local function declaration, then they are
+      // declared in different scopes, even though isDeclInScope may think
+      // they're in the same scope. (If both are local, the scope check is
+      // sufficent, and if neither is local, then they are in the same scope.)
+      continue;
+    }
+
+    // We found the right previous declaration.
+    break;
+  }
+
   // C++ [dcl.fct.default]p4:
   //   For non-template functions, default arguments can be added in
   //   later declarations of a function in the same
@@ -439,30 +493,17 @@ bool Sema::MergeCXXFunctionDecl(FunctionDecl *New, FunctionDecl *Old,
   //   in a member function definition that appears outside of the class
   //   definition are added to the set of default arguments provided by the
   //   member function declaration in the class definition.
-  for (unsigned p = 0, NumParams = Old->getNumParams(); p < NumParams; ++p) {
-    ParmVarDecl *OldParam = Old->getParamDecl(p);
+  for (unsigned p = 0, NumParams = PrevForDefaultArgs
+                                       ? PrevForDefaultArgs->getNumParams()
+                                       : 0;
+       p < NumParams; ++p) {
+    ParmVarDecl *OldParam = PrevForDefaultArgs->getParamDecl(p);
     ParmVarDecl *NewParam = New->getParamDecl(p);
 
-    bool OldParamHasDfl = OldParam->hasDefaultArg();
+    bool OldParamHasDfl = OldParam ? OldParam->hasDefaultArg() : false;
     bool NewParamHasDfl = NewParam->hasDefaultArg();
 
-    NamedDecl *ND = Old;
-
-    // The declaration context corresponding to the scope is the semantic
-    // parent, unless this is a local function declaration, in which case
-    // it is that surrounding function.
-    DeclContext *ScopeDC = New->getLexicalDeclContext();
-    if (!ScopeDC->isFunctionOrMethod())
-      ScopeDC = New->getDeclContext();
-    if (S && !isDeclInScope(ND, ScopeDC, S) &&
-        !New->getDeclContext()->isRecord())
-      // Ignore default parameters of old decl if they are not in
-      // the same scope and this is not an out-of-line definition of
-      // a member function.
-      OldParamHasDfl = false;
-
     if (OldParamHasDfl && NewParamHasDfl) {
-
       unsigned DiagDefaultParamID =
         diag::err_param_default_argument_redefinition;
 
@@ -470,7 +511,7 @@ bool Sema::MergeCXXFunctionDecl(FunctionDecl *New, FunctionDecl *Old,
       // of template class. The new default parameter's value is ignored.
       Invalid = true;
       if (getLangOpts().MicrosoftExt) {
-        CXXMethodDecl* MD = dyn_cast<CXXMethodDecl>(New);
+        CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(New);
         if (MD && MD->getParent()->getDescribedClassTemplate()) {
           // Merge the old default argument into the new parameter.
           NewParam->setHasInheritedDefaultArg();
@@ -484,6 +525,7 @@ bool Sema::MergeCXXFunctionDecl(FunctionDecl *New, FunctionDecl *Old,
         }
       }
 
+      (void)DiagDefaultParamID;
 #if 0 // Disable until Diag is rewired
       // FIXME: If we knew where the '=' was, we could easily provide a fix-it 
       // hint here. Alternatively, we could walk the type-source information
@@ -498,14 +540,12 @@ bool Sema::MergeCXXFunctionDecl(FunctionDecl *New, FunctionDecl *Old,
       
       // Look for the function declaration where the default argument was
       // actually written, which may be a declaration prior to Old.
-      for (FunctionDecl *Older = Old->getPreviousDecl();
-           Older; Older = Older->getPreviousDecl()) {
-        if (!Older->getParamDecl(p)->hasDefaultArg())
-          break;
-        
+      for (auto Older = PrevForDefaultArgs;
+           OldParam->hasInheritedDefaultArg(); /**/) {
+        Older = Older->getPreviousDecl();
         OldParam = Older->getParamDecl(p);
-      }        
-      
+      }
+
       Diag(OldParam->getLocation(), diag::note_previous_definition)
         << OldParam->getDefaultArgRange();
 #endif
@@ -514,7 +554,9 @@ bool Sema::MergeCXXFunctionDecl(FunctionDecl *New, FunctionDecl *Old,
       // It's important to use getInit() here;  getDefaultArg()
       // strips off any top-level ExprWithCleanups.
       NewParam->setHasInheritedDefaultArg();
-      if (OldParam->hasUninstantiatedDefaultArg())
+      if (OldParam->hasUnparsedDefaultArg())
+        NewParam->setUnparsedDefaultArg();
+      else if (OldParam->hasUninstantiatedDefaultArg())
         NewParam->setUninstantiatedDefaultArg(
                                       OldParam->getUninstantiatedDefaultArg());
       else
@@ -525,8 +567,9 @@ bool Sema::MergeCXXFunctionDecl(FunctionDecl *New, FunctionDecl *Old,
         Diag(NewParam->getLocation(),
              diag::err_param_default_argument_template_redecl)
           << NewParam->getDefaultArgRange();
-        Diag(Old->getLocation(), diag::note_template_prev_declaration)
-          << false;
+        Diag(PrevForDefaultArgs->getLocation(),
+             diag::note_template_prev_declaration)
+            << false;
       } else if (New->getTemplateSpecializationKind()
                    != TSK_ImplicitInstantiation &&
                  New->getTemplateSpecializationKind() != TSK_Undeclared) {
@@ -597,7 +640,8 @@ bool Sema::MergeCXXFunctionDecl(FunctionDecl *New, FunctionDecl *Old,
       << New << New->isConstexpr();
     Diag(Old->getLocation(), diag::note_previous_declaration);
     Invalid = true;
-  } else if (!Old->isInlined() && New->isInlined() && Old->isDefined(Def)) {
+  } else if (!Old->getMostRecentDecl()->isInlined() && New->isInlined() &&
+             Old->isDefined(Def)) {
     // C++11 [dcl.fcn.spec]p4:
     //   If the definition of a function appears in a translation unit before its
     //   first declaration as inline, the program is ill-formed.
@@ -679,16 +723,16 @@ void Sema::CheckCXXDefaultArguments(FunctionDecl *FD) {
       break;
   }
 
-  // C++ [dcl.fct.default]p4:
-  //   In a given function declaration, all parameters
-  //   subsequent to a parameter with a default argument shall
-  //   have default arguments supplied in this or previous
-  //   declarations. A default argument shall not be redefined
-  //   by a later declaration (not even to the same value).
+  // C++11 [dcl.fct.default]p4:
+  //   In a given function declaration, each parameter subsequent to a parameter
+  //   with a default argument shall have a default argument supplied in this or
+  //   a previous declaration or shall be a function parameter pack. A default
+  //   argument shall not be redefined by a later declaration (not even to the
+  //   same value).
   unsigned LastMissingDefaultArg = 0;
   for (; p < NumParams; ++p) {
     ParmVarDecl *Param = FD->getParamDecl(p);
-    if (!Param->hasDefaultArg()) {
+    if (!Param->hasDefaultArg() && !Param->isParameterPack()) {
       if (Param->isInvalidDecl())
         /* We already complained about this parameter. */;
       else if (Param->getIdentifier())
@@ -785,7 +829,8 @@ bool Sema::CheckConstexprFunctionDecl(const FunctionDecl *NewFD) {
     // - it shall not be virtual;
     const CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(NewFD);
     if (Method && Method->isVirtual()) {
-      Diag(NewFD->getLocation(), diag::err_constexpr_virtual);
+      Method = Method->getCanonicalDecl();
+      Diag(Method->getLocation(), diag::err_constexpr_virtual);
 
       // If it's not obvious why this function is virtual, find an overridden
       // function which uses the 'virtual' keyword.
@@ -857,7 +902,7 @@ static bool CheckConstexprDeclStmt(Sema &SemaRef, const FunctionDecl *Dcl,
       // C++1y allows types to be defined, not just declared.
       if (cast<TagDecl>(DclIt)->isThisDeclarationADefinition())
         SemaRef.Diag(DS->getLocStart(),
-                     SemaRef.getLangOpts().CPlusPlus1y
+                     SemaRef.getLangOpts().CPlusPlus14
                        ? diag::warn_cxx11_compat_constexpr_type_definition
                        : diag::ext_constexpr_type_definition)
           << isa<CXXConstructorDecl>(Dcl);
@@ -898,7 +943,7 @@ static bool CheckConstexprDeclStmt(Sema &SemaRef, const FunctionDecl *Dcl,
         }
       }
       SemaRef.Diag(VD->getLocation(),
-                   SemaRef.getLangOpts().CPlusPlus1y
+                   SemaRef.getLangOpts().CPlusPlus14
                     ? diag::warn_cxx11_compat_constexpr_local_var
                     : diag::ext_constexpr_local_var)
         << isa<CXXConstructorDecl>(Dcl);
@@ -1043,13 +1088,13 @@ CheckConstexprFunctionStmt(Sema &SemaRef, const FunctionDecl *Dcl, Stmt *S,
   case Stmt::ContinueStmtClass:
     // C++1y allows all of these. We don't allow them as extensions in C++11,
     // because they don't make sense without variable mutation.
-    if (!SemaRef.getLangOpts().CPlusPlus1y)
+    if (!SemaRef.getLangOpts().CPlusPlus14)
       break;
     if (!Cxx1yLoc.isValid())
       Cxx1yLoc = S->getLocStart();
-    for (Stmt::child_range Children = S->children(); Children; ++Children)
-      if (*Children &&
-          !CheckConstexprFunctionStmt(SemaRef, Dcl, *Children, ReturnStmts,
+    for (Stmt *SubStmt : S->children())
+      if (SubStmt &&
+          !CheckConstexprFunctionStmt(SemaRef, Dcl, SubStmt, ReturnStmts,
                                       Cxx1yLoc))
         return false;
     return true;
@@ -1062,9 +1107,9 @@ CheckConstexprFunctionStmt(Sema &SemaRef, const FunctionDecl *Dcl, Stmt *S,
     // mutation, we can reasonably allow them in C++11 as an extension.
     if (!Cxx1yLoc.isValid())
       Cxx1yLoc = S->getLocStart();
-    for (Stmt::child_range Children = S->children(); Children; ++Children)
-      if (*Children &&
-          !CheckConstexprFunctionStmt(SemaRef, Dcl, *Children, ReturnStmts,
+    for (Stmt *SubStmt : S->children())
+      if (SubStmt &&
+          !CheckConstexprFunctionStmt(SemaRef, Dcl, SubStmt, ReturnStmts,
                                       Cxx1yLoc))
         return false;
     return true;
@@ -1117,7 +1162,7 @@ bool Sema::CheckConstexprFunctionBody(const FunctionDecl *Dcl, Stmt *Body) {
 
   if (Cxx1yLoc.isValid())
     Diag(Cxx1yLoc,
-         getLangOpts().CPlusPlus1y
+         getLangOpts().CPlusPlus14
            ? diag::warn_cxx11_compat_constexpr_body_invalid_stmt
            : diag::ext_constexpr_body_invalid_stmt)
       << isa<CXXConstructorDecl>(Dcl);
@@ -1182,17 +1227,17 @@ bool Sema::CheckConstexprFunctionBody(const FunctionDecl *Dcl, Stmt *Body) {
       // statement. We still do, unless the return type might be void, because
       // otherwise if there's no return statement, the function cannot
       // be used in a core constant expression.
-      bool OK = getLangOpts().CPlusPlus1y &&
+      bool OK = getLangOpts().CPlusPlus14 &&
                 (Dcl->getReturnType()->isVoidType() ||
                  Dcl->getReturnType()->isDependentType());
       Diag(Dcl->getLocation(),
            OK ? diag::warn_cxx11_compat_constexpr_body_no_return
               : diag::err_constexpr_body_no_return);
-      return OK;
-    }
-    if (ReturnStmts.size() > 1) {
+      if (!OK)
+        return false;
+    } else if (ReturnStmts.size() > 1) {
       Diag(ReturnStmts.back(),
-           getLangOpts().CPlusPlus1y
+           getLangOpts().CPlusPlus14
              ? diag::warn_cxx11_compat_constexpr_body_multiple_return
              : diag::ext_constexpr_body_multiple_return);
       for (unsigned I = 0; I < ReturnStmts.size() - 1; ++I)
@@ -1301,57 +1346,6 @@ static bool findCircularInheritance(const CXXRecordDecl *Class,
   return false;
 }
 
-/// \brief Perform propagation of DLL attributes from a derived class to a
-/// templated base class for MS compatibility.
-static void propagateDLLAttrToBaseClassTemplate(
-    Sema &S, CXXRecordDecl *Class, Attr *ClassAttr,
-    ClassTemplateSpecializationDecl *BaseTemplateSpec, SourceLocation BaseLoc) {
-  if (getDLLAttr(
-          BaseTemplateSpec->getSpecializedTemplate()->getTemplatedDecl())) {
-    // If the base class template has a DLL attribute, don't try to change it.
-    return;
-  }
-
-  if (BaseTemplateSpec->getSpecializationKind() == TSK_Undeclared) {
-    // If the base class is not already specialized, we can do the propagation.
-    auto *NewAttr = cast<InheritableAttr>(ClassAttr->clone(S.getASTContext()));
-    NewAttr->setInherited(true);
-    BaseTemplateSpec->addAttr(NewAttr);
-    return;
-  }
-
-  bool DifferentAttribute = false;
-  if (Attr *SpecializationAttr = getDLLAttr(BaseTemplateSpec)) {
-    if (!SpecializationAttr->isInherited()) {
-      // The template has previously been specialized or instantiated with an
-      // explicit attribute. We should not try to change it.
-      return;
-    }
-    if (SpecializationAttr->getKind() == ClassAttr->getKind()) {
-      // The specialization already has the right attribute.
-      return;
-    }
-    DifferentAttribute = true;
-  }
-
-  // The template was previously instantiated or explicitly specialized without
-  // a dll attribute, or the template was previously instantiated with a
-  // different inherited attribute. It's too late for us to change the
-  // attribute, so warn that this is unsupported.
-  S.Diag(BaseLoc, diag::warn_attribute_dll_instantiated_base_class)
-      << BaseTemplateSpec->isExplicitSpecialization() << DifferentAttribute;
-  S.Diag(ClassAttr->getLocation(), diag::note_attribute);
-  if (BaseTemplateSpec->isExplicitSpecialization()) {
-    S.Diag(BaseTemplateSpec->getLocation(),
-           diag::note_template_class_explicit_specialization_was_here)
-        << BaseTemplateSpec;
-  } else {
-    S.Diag(BaseTemplateSpec->getPointOfInstantiation(),
-           diag::note_template_class_instantiation_was_here)
-        << BaseTemplateSpec;
-  }
-}
-
 /// \brief Check the validity of a C++ base class specifier.
 ///
 /// \returns a new CXXBaseSpecifier if well-formed, emits diagnostics
@@ -1423,8 +1417,8 @@ Sema::CheckBaseSpecifier(CXXRecordDecl *Class,
     if (Attr *ClassAttr = getDLLAttr(Class)) {
       if (auto *BaseTemplate = dyn_cast_or_null<ClassTemplateSpecializationDecl>(
               BaseType->getAsCXXRecordDecl())) {
-        propagateDLLAttrToBaseClassTemplate(*this, Class, ClassAttr,
-                                            BaseTemplate, BaseLoc);
+        propagateDLLAttrToBaseClassTemplate(Class, ClassAttr, BaseTemplate,
+                                            BaseLoc);
       }
     }
   }
@@ -1535,11 +1529,36 @@ Sema::ActOnBaseSpecifier(Decl *classdecl, SourceRange SpecifierRange,
   return true;
 }
 
+/// Use small set to collect indirect bases.  As this is only used
+/// locally, there's no need to abstract the small size parameter.
+typedef llvm::SmallPtrSet<QualType, 4> IndirectBaseSet;
+
+/// \brief Recursively add the bases of Type.  Don't add Type itself.
+static void
+NoteIndirectBases(ASTContext &Context, IndirectBaseSet &Set,
+                  const QualType &Type)
+{
+  // Even though the incoming type is a base, it might not be
+  // a class -- it could be a template parm, for instance.
+  if (auto Rec = Type->getAs<RecordType>()) {
+    auto Decl = Rec->getAsCXXRecordDecl();
+
+    // Iterate over its bases.
+    for (const auto &BaseSpec : Decl->bases()) {
+      QualType Base = Context.getCanonicalType(BaseSpec.getType())
+        .getUnqualifiedType();
+      if (Set.insert(Base).second)
+        // If we've not already seen it, recurse.
+        NoteIndirectBases(Context, Set, Base);
+    }
+  }
+}
+
 /// \brief Performs the actual work of attaching the given base class
 /// specifiers to a C++ class.
-bool Sema::AttachBaseSpecifiers(CXXRecordDecl *Class, CXXBaseSpecifier **Bases,
-                                unsigned NumBases) {
- if (NumBases == 0)
+bool Sema::AttachBaseSpecifiers(CXXRecordDecl *Class,
+                                MutableArrayRef<CXXBaseSpecifier *> Bases) {
+ if (Bases.empty())
     return false;
 
   // Used to keep track of which base types we have already seen, so
@@ -1548,10 +1567,14 @@ bool Sema::AttachBaseSpecifiers(CXXRecordDecl *Class, CXXBaseSpecifier **Bases,
   // class.
   std::map<QualType, CXXBaseSpecifier*, QualTypeOrdering> KnownBaseTypes;
 
+  // Used to track indirect bases so we can see if a direct base is
+  // ambiguous.
+  IndirectBaseSet IndirectBaseTypes;
+
   // Copy non-redundant base specifiers into permanent storage.
   unsigned NumGoodBases = 0;
   bool Invalid = false;
-  for (unsigned idx = 0; idx < NumBases; ++idx) {
+  for (unsigned idx = 0; idx < Bases.size(); ++idx) {
     QualType NewBaseType
       = Context.getCanonicalType(Bases[idx]->getType());
     NewBaseType = NewBaseType.getLocalUnqualifiedType();
@@ -1575,6 +1598,11 @@ bool Sema::AttachBaseSpecifiers(CXXRecordDecl *Class, CXXBaseSpecifier **Bases,
       // Okay, add this new base class.
       KnownBase = Bases[idx];
       Bases[NumGoodBases++] = Bases[idx];
+
+      // Note this base's direct & indirect bases, if there could be ambiguity.
+      if (Bases.size() > 1)
+        NoteIndirectBases(Context, IndirectBaseTypes, NewBaseType);
+      
       if (const RecordType *Record = NewBaseType->getAs<RecordType>()) {
         const CXXRecordDecl *RD = cast<CXXRecordDecl>(Record->getDecl());
         if (Class->isInterface() &&
@@ -1594,12 +1622,34 @@ bool Sema::AttachBaseSpecifiers(CXXRecordDecl *Class, CXXBaseSpecifier **Bases,
   }
 
   // Attach the remaining base class specifiers to the derived class.
-  Class->setBases(Bases, NumGoodBases);
+  Class->setBases(Bases.data(), NumGoodBases);
+  
+  for (unsigned idx = 0; idx < NumGoodBases; ++idx) {
+    // Check whether this direct base is inaccessible due to ambiguity.
+    QualType BaseType = Bases[idx]->getType();
+    CanQualType CanonicalBase = Context.getCanonicalType(BaseType)
+      .getUnqualifiedType();
 
-  // Delete the remaining (good) base class specifiers, since their
-  // data has been copied into the CXXRecordDecl.
-  for (unsigned idx = 0; idx < NumGoodBases; ++idx)
+    if (IndirectBaseTypes.count(CanonicalBase)) {
+      CXXBasePaths Paths(/*FindAmbiguities=*/true, /*RecordPaths=*/true,
+                         /*DetectVirtual=*/true);
+      bool found
+        = Class->isDerivedFrom(CanonicalBase->getAsCXXRecordDecl(), Paths);
+      assert(found);
+      (void)found;
+
+      if (Paths.isAmbiguous(CanonicalBase))
+        Diag(Bases[idx]->getLocStart (), diag::warn_inaccessible_base_class)
+          << BaseType << getAmbiguousPathsDisplayString(Paths)
+          << Bases[idx]->getSourceRange();
+      else
+        assert(Bases[idx]->isVirtual());
+    }
+
+    // Delete the base class specifier, since its data has been copied
+    // into the CXXRecordDecl.
     Context.Deallocate(Bases[idx]);
+  }
 
   return Invalid;
 }
@@ -1607,21 +1657,21 @@ bool Sema::AttachBaseSpecifiers(CXXRecordDecl *Class, CXXBaseSpecifier **Bases,
 /// ActOnBaseSpecifiers - Attach the given base specifiers to the
 /// class, after checking whether there are any duplicate base
 /// classes.
-void Sema::ActOnBaseSpecifiers(Decl *ClassDecl, CXXBaseSpecifier **Bases,
-                               unsigned NumBases) {
-  if (!ClassDecl || !Bases || !NumBases)
+void Sema::ActOnBaseSpecifiers(Decl *ClassDecl,
+                               MutableArrayRef<CXXBaseSpecifier *> Bases) {
+  if (!ClassDecl || Bases.empty())
     return;
 
   AdjustDeclIfTemplate(ClassDecl);
-  AttachBaseSpecifiers(cast<CXXRecordDecl>(ClassDecl), Bases, NumBases);
+  AttachBaseSpecifiers(cast<CXXRecordDecl>(ClassDecl), Bases);
 }
 
 /// \brief Determine whether the type \p Derived is a C++ class that is
 /// derived from the type \p Base.
-bool Sema::IsDerivedFrom(QualType Derived, QualType Base) {
+bool Sema::IsDerivedFrom(SourceLocation Loc, QualType Derived, QualType Base) {
   if (!getLangOpts().CPlusPlus)
     return false;
-  
+
   CXXRecordDecl *DerivedRD = Derived->getAsCXXRecordDecl();
   if (!DerivedRD)
     return false;
@@ -1635,13 +1685,18 @@ bool Sema::IsDerivedFrom(QualType Derived, QualType Base) {
   if (BaseRD->isInvalidDecl() || DerivedRD->isInvalidDecl())
     return false;
 
-  // FIXME: instantiate DerivedRD if necessary.  We need a PoI for this.
-  return DerivedRD->hasDefinition() && DerivedRD->isDerivedFrom(BaseRD);
+  // FIXME: In a modules build, do we need the entire path to be visible for us
+  // to be able to use the inheritance relationship?
+  if (!isCompleteType(Loc, Derived) && !DerivedRD->isBeingDefined())
+    return false;
+  
+  return DerivedRD->isDerivedFrom(BaseRD);
 }
 
 /// \brief Determine whether the type \p Derived is a C++ class that is
 /// derived from the type \p Base.
-bool Sema::IsDerivedFrom(QualType Derived, QualType Base, CXXBasePaths &Paths) {
+bool Sema::IsDerivedFrom(SourceLocation Loc, QualType Derived, QualType Base,
+                         CXXBasePaths &Paths) {
   if (!getLangOpts().CPlusPlus)
     return false;
   
@@ -1651,6 +1706,9 @@ bool Sema::IsDerivedFrom(QualType Derived, QualType Base, CXXBasePaths &Paths) {
   
   CXXRecordDecl *BaseRD = Base->getAsCXXRecordDecl();
   if (!BaseRD)
+    return false;
+  
+  if (!isCompleteType(Loc, Derived) && !DerivedRD->isBeingDefined())
     return false;
   
   return DerivedRD->isDerivedFrom(BaseRD, Paths);
@@ -1679,18 +1737,6 @@ void Sema::BuildBasePathArray(const CXXBasePaths &Paths,
     BasePathArray.push_back(const_cast<CXXBaseSpecifier*>(Path[I].Base));
 }
 
-/// \brief Determine whether the given base path includes a virtual
-/// base class.
-bool Sema::BasePathInvolvesVirtualBase(const CXXCastPath &BasePath) {
-  for (CXXCastPath::const_iterator B = BasePath.begin(), 
-                                BEnd = BasePath.end();
-       B != BEnd; ++B)
-    if ((*B)->isVirtual())
-      return true;
-
-  return false;
-}
-
 /// CheckDerivedToBaseConversion - Check whether the Derived-to-Base
 /// conversion (where Derived and Base are class types) is
 /// well-formed, meaning that the conversion is unambiguous (and
@@ -1699,26 +1745,31 @@ bool Sema::BasePathInvolvesVirtualBase(const CXXCastPath &BasePath) {
 /// otherwise. Loc is the location where this routine should point to
 /// if there is an error, and Range is the source range to highlight
 /// if there is an error.
+///
+/// If either InaccessibleBaseID or AmbigiousBaseConvID are 0, then the
+/// diagnostic for the respective type of error will be suppressed, but the
+/// check for ill-formed code will still be performed.
 bool
 Sema::CheckDerivedToBaseConversion(QualType Derived, QualType Base,
                                    unsigned InaccessibleBaseID,
                                    unsigned AmbigiousBaseConvID,
                                    SourceLocation Loc, SourceRange Range,
                                    DeclarationName Name,
-                                   CXXCastPath *BasePath) {
+                                   CXXCastPath *BasePath,
+                                   bool IgnoreAccess) {
   // First, determine whether the path from Derived to Base is
   // ambiguous. This is slightly more expensive than checking whether
   // the Derived to Base conversion exists, because here we need to
   // explore multiple paths to determine if there is an ambiguity.
   CXXBasePaths Paths(/*FindAmbiguities=*/true, /*RecordPaths=*/true,
                      /*DetectVirtual=*/false);
-  bool DerivationOkay = IsDerivedFrom(Derived, Base, Paths);
+  bool DerivationOkay = IsDerivedFrom(Loc, Derived, Base, Paths);
   assert(DerivationOkay &&
          "Can only be used with a derived-to-base conversion");
   (void)DerivationOkay;
   
   if (!Paths.isAmbiguous(Context.getCanonicalType(Base).getUnqualifiedType())) {
-    if (InaccessibleBaseID) {
+    if (!IgnoreAccess) {
       // Check that the base class can be accessed.
       switch (CheckBaseClassAccess(Loc, Base, Derived, Paths.front(),
                                    InaccessibleBaseID)) {
@@ -1746,7 +1797,7 @@ Sema::CheckDerivedToBaseConversion(QualType Derived, QualType Base,
     // performance isn't as much of an issue.
     Paths.clear();
     Paths.setRecordingPaths(true);
-    bool StillOkay = IsDerivedFrom(Derived, Base, Paths);
+    bool StillOkay = IsDerivedFrom(Loc, Derived, Base, Paths);
     assert(StillOkay && "Can only be used with a derived-to-base conversion");
     (void)StillOkay;
 
@@ -1767,12 +1818,10 @@ Sema::CheckDerivedToBaseConversion(QualType Derived, QualType Base,
                                    SourceLocation Loc, SourceRange Range,
                                    CXXCastPath *BasePath,
                                    bool IgnoreAccess) {
-  return CheckDerivedToBaseConversion(Derived, Base,
-                                      IgnoreAccess ? 0
-                                       : diag::err_upcast_to_inaccessible_base,
-                                      diag::err_ambiguous_derived_to_base_conv,
-                                      Loc, Range, DeclarationName(), 
-                                      BasePath);
+  return CheckDerivedToBaseConversion(
+      Derived, Base, diag::err_upcast_to_inaccessible_base,
+      diag::err_ambiguous_derived_to_base_conv, Loc, Range, DeclarationName(),
+      BasePath, IgnoreAccess);
 }
 
 
@@ -1883,7 +1932,7 @@ void Sema::CheckOverrideControl(NamedDecl *D) {
   }
 
   // C++11 [class.virtual]p5:
-  //   If a virtual function is marked with the virt-specifier override and
+  //   If a function is marked with the virt-specifier override and
   //   does not override a member function of a base class, the program is
   //   ill-formed.
   bool HasOverriddenMethods =
@@ -1891,6 +1940,30 @@ void Sema::CheckOverrideControl(NamedDecl *D) {
   if (MD->hasAttr<OverrideAttr>() && !HasOverriddenMethods)
     Diag(MD->getLocation(), diag::err_function_marked_override_not_overriding)
       << MD->getDeclName();
+}
+
+void Sema::DiagnoseAbsenceOfOverrideControl(NamedDecl *D) {
+  if (D->isInvalidDecl() || D->hasAttr<OverrideAttr>())
+    return;
+  CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(D);
+  if (!MD || MD->isImplicit() || MD->hasAttr<FinalAttr>() ||
+      isa<CXXDestructorDecl>(MD))
+    return;
+
+  SourceLocation Loc = MD->getLocation();
+  SourceLocation SpellingLoc = Loc;
+  if (getSourceManager().isMacroArgExpansion(Loc))
+    SpellingLoc = getSourceManager().getImmediateExpansionRange(Loc).first;
+  SpellingLoc = getSourceManager().getSpellingLoc(SpellingLoc);
+  if (SpellingLoc.isValid() && getSourceManager().isInSystemHeader(SpellingLoc))
+      return;
+    
+  if (MD->size_overridden_methods() > 0) {
+    Diag(MD->getLocation(), diag::warn_function_marked_not_override_overriding)
+      << MD->getDeclName();
+    const CXXMethodDecl *OMD = *MD->begin_overridden_methods();
+    Diag(OMD->getLocation(), diag::note_overridden_virtual_function);
+  }
 }
 
 /// CheckIfOverriddenFunctionIsMarkedFinal - Checks whether a virtual member
@@ -2125,8 +2198,6 @@ Sema::ActOnCXXMemberDeclarator(Scope *S, AccessSpecifier AS, Declarator &D,
       assert(Member && "HandleField never returns null");
     }
   } else {
-    assert(InitStyle == ICIS_NoInit || D.getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_static);
-
     Member = HandleDeclarator(S, D, TemplateParameterLists);
     if (!Member)
       return nullptr;
@@ -2135,7 +2206,7 @@ Sema::ActOnCXXMemberDeclarator(Scope *S, AccessSpecifier AS, Declarator &D,
     if (BitWidth) {
       if (Member->isInvalidDecl()) {
         // don't emit another diagnostic.
-      } else if (isa<VarDecl>(Member)) {
+      } else if (isa<VarDecl>(Member) || isa<VarTemplateDecl>(Member)) {
         // C++ 9.6p3: A bit-field shall not be a static member.
         // "static member 'A' cannot be a bit-field"
         Diag(Loc, diag::err_static_not_bitfield)
@@ -2207,18 +2278,73 @@ namespace {
     Sema &S;
     // List of Decls to generate a warning on.  Also remove Decls that become
     // initialized.
-    llvm::SmallPtrSet<ValueDecl*, 4> &Decls;
+    llvm::SmallPtrSetImpl<ValueDecl*> &Decls;
+    // List of base classes of the record.  Classes are removed after their
+    // initializers.
+    llvm::SmallPtrSetImpl<QualType> &BaseClasses;
+    // Vector of decls to be removed from the Decl set prior to visiting the
+    // nodes.  These Decls may have been initialized in the prior initializer.
+    llvm::SmallVector<ValueDecl*, 4> DeclsToRemove;
     // If non-null, add a note to the warning pointing back to the constructor.
     const CXXConstructorDecl *Constructor;
+    // Variables to hold state when processing an initializer list.  When
+    // InitList is true, special case initialization of FieldDecls matching
+    // InitListFieldDecl.
+    bool InitList;
+    FieldDecl *InitListFieldDecl;
+    llvm::SmallVector<unsigned, 4> InitFieldIndex;
+
   public:
     typedef EvaluatedExprVisitor<UninitializedFieldVisitor> Inherited;
     UninitializedFieldVisitor(Sema &S,
-                              llvm::SmallPtrSet<ValueDecl*, 4> &Decls,
-                              const CXXConstructorDecl *Constructor)
-      : Inherited(S.Context), S(S), Decls(Decls),
-        Constructor(Constructor) { }
+                              llvm::SmallPtrSetImpl<ValueDecl*> &Decls,
+                              llvm::SmallPtrSetImpl<QualType> &BaseClasses)
+      : Inherited(S.Context), S(S), Decls(Decls), BaseClasses(BaseClasses),
+        Constructor(nullptr), InitList(false), InitListFieldDecl(nullptr) {}
 
-    void HandleMemberExpr(MemberExpr *ME, bool CheckReferenceOnly) {
+    // Returns true if the use of ME is not an uninitialized use.
+    bool IsInitListMemberExprInitialized(MemberExpr *ME,
+                                         bool CheckReferenceOnly) {
+      llvm::SmallVector<FieldDecl*, 4> Fields;
+      bool ReferenceField = false;
+      while (ME) {
+        FieldDecl *FD = dyn_cast<FieldDecl>(ME->getMemberDecl());
+        if (!FD)
+          return false;
+        Fields.push_back(FD);
+        if (FD->getType()->isReferenceType())
+          ReferenceField = true;
+        ME = dyn_cast<MemberExpr>(ME->getBase()->IgnoreParenImpCasts());
+      }
+
+      // Binding a reference to an unintialized field is not an
+      // uninitialized use.
+      if (CheckReferenceOnly && !ReferenceField)
+        return true;
+
+      llvm::SmallVector<unsigned, 4> UsedFieldIndex;
+      // Discard the first field since it is the field decl that is being
+      // initialized.
+      for (auto I = Fields.rbegin() + 1, E = Fields.rend(); I != E; ++I) {
+        UsedFieldIndex.push_back((*I)->getFieldIndex());
+      }
+
+      for (auto UsedIter = UsedFieldIndex.begin(),
+                UsedEnd = UsedFieldIndex.end(),
+                OrigIter = InitFieldIndex.begin(),
+                OrigEnd = InitFieldIndex.end();
+           UsedIter != UsedEnd && OrigIter != OrigEnd; ++UsedIter, ++OrigIter) {
+        if (*UsedIter < *OrigIter)
+          return true;
+        if (*UsedIter > *OrigIter)
+          break;
+      }
+
+      return false;
+    }
+
+    void HandleMemberExpr(MemberExpr *ME, bool CheckReferenceOnly,
+                          bool AddressOf) {
       if (isa<EnumConstantDecl>(ME->getMemberDecl()))
         return;
 
@@ -2226,33 +2352,63 @@ namespace {
       // or union.
       MemberExpr *FieldME = ME;
 
-      Expr *Base = ME;
-      while (isa<MemberExpr>(Base)) {
-        ME = cast<MemberExpr>(Base);
+      bool AllPODFields = FieldME->getType().isPODType(S.Context);
 
-        if (isa<VarDecl>(ME->getMemberDecl()))
+      Expr *Base = ME;
+      while (MemberExpr *SubME =
+                 dyn_cast<MemberExpr>(Base->IgnoreParenImpCasts())) {
+
+        if (isa<VarDecl>(SubME->getMemberDecl()))
           return;
 
-        if (FieldDecl *FD = dyn_cast<FieldDecl>(ME->getMemberDecl()))
+        if (FieldDecl *FD = dyn_cast<FieldDecl>(SubME->getMemberDecl()))
           if (!FD->isAnonymousStructOrUnion())
-            FieldME = ME;
+            FieldME = SubME;
 
-        Base = ME->getBase();
+        if (!FieldME->getType().isPODType(S.Context))
+          AllPODFields = false;
+
+        Base = SubME->getBase();
       }
 
-      if (!isa<CXXThisExpr>(Base))
+      if (!isa<CXXThisExpr>(Base->IgnoreParenImpCasts()))
+        return;
+
+      if (AddressOf && AllPODFields)
         return;
 
       ValueDecl* FoundVD = FieldME->getMemberDecl();
+
+      if (ImplicitCastExpr *BaseCast = dyn_cast<ImplicitCastExpr>(Base)) {
+        while (isa<ImplicitCastExpr>(BaseCast->getSubExpr())) {
+          BaseCast = cast<ImplicitCastExpr>(BaseCast->getSubExpr());
+        }
+
+        if (BaseCast->getCastKind() == CK_UncheckedDerivedToBase) {
+          QualType T = BaseCast->getType();
+          if (T->isPointerType() &&
+              BaseClasses.count(T->getPointeeType())) {
+            S.Diag(FieldME->getExprLoc(), diag::warn_base_class_is_uninit)
+                << T->getPointeeType() << FoundVD;
+          }
+        }
+      }
 
       if (!Decls.count(FoundVD))
         return;
 
       const bool IsReference = FoundVD->getType()->isReferenceType();
 
-      // Prevent double warnings on use of unbounded references.
-      if (IsReference != CheckReferenceOnly)
-        return;
+      if (InitList && !AddressOf && FoundVD == InitListFieldDecl) {
+        // Special checking for initializer lists.
+        if (IsInitListMemberExprInitialized(ME, CheckReferenceOnly)) {
+          return;
+        }
+      } else {
+        // Prevent double warnings on use of unbounded references.
+        if (CheckReferenceOnly && !IsReference)
+          return;
+      }
 
       unsigned diag = IsReference
           ? diag::warn_reference_field_is_uninit
@@ -2265,72 +2421,158 @@ namespace {
 
     }
 
-    void HandleValue(Expr *E) {
+    void HandleValue(Expr *E, bool AddressOf) {
       E = E->IgnoreParens();
 
       if (MemberExpr *ME = dyn_cast<MemberExpr>(E)) {
-        HandleMemberExpr(ME, false /*CheckReferenceOnly*/);
+        HandleMemberExpr(ME, false /*CheckReferenceOnly*/,
+                         AddressOf /*AddressOf*/);
         return;
       }
 
       if (ConditionalOperator *CO = dyn_cast<ConditionalOperator>(E)) {
-        HandleValue(CO->getTrueExpr());
-        HandleValue(CO->getFalseExpr());
+        Visit(CO->getCond());
+        HandleValue(CO->getTrueExpr(), AddressOf);
+        HandleValue(CO->getFalseExpr(), AddressOf);
         return;
       }
 
       if (BinaryConditionalOperator *BCO =
               dyn_cast<BinaryConditionalOperator>(E)) {
-        HandleValue(BCO->getCommon());
-        HandleValue(BCO->getFalseExpr());
+        Visit(BCO->getCond());
+        HandleValue(BCO->getFalseExpr(), AddressOf);
+        return;
+      }
+
+      if (OpaqueValueExpr *OVE = dyn_cast<OpaqueValueExpr>(E)) {
+        HandleValue(OVE->getSourceExpr(), AddressOf);
         return;
       }
 
       if (BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
         switch (BO->getOpcode()) {
         default:
-          return;
+          break;
         case(BO_PtrMemD):
         case(BO_PtrMemI):
-          HandleValue(BO->getLHS());
+          HandleValue(BO->getLHS(), AddressOf);
+          Visit(BO->getRHS());
           return;
         case(BO_Comma):
-          HandleValue(BO->getRHS());
+          Visit(BO->getLHS());
+          HandleValue(BO->getRHS(), AddressOf);
           return;
         }
       }
+
+      Visit(E);
+    }
+
+    void CheckInitListExpr(InitListExpr *ILE) {
+      InitFieldIndex.push_back(0);
+      for (auto Child : ILE->children()) {
+        if (InitListExpr *SubList = dyn_cast<InitListExpr>(Child)) {
+          CheckInitListExpr(SubList);
+        } else {
+          Visit(Child);
+        }
+        ++InitFieldIndex.back();
+      }
+      InitFieldIndex.pop_back();
+    }
+
+    void CheckInitializer(Expr *E, const CXXConstructorDecl *FieldConstructor,
+                          FieldDecl *Field, const Type *BaseClass) {
+      // Remove Decls that may have been initialized in the previous
+      // initializer.
+      for (ValueDecl* VD : DeclsToRemove)
+        Decls.erase(VD);
+      DeclsToRemove.clear();
+
+      Constructor = FieldConstructor;
+      InitListExpr *ILE = dyn_cast<InitListExpr>(E);
+
+      if (ILE && Field) {
+        InitList = true;
+        InitListFieldDecl = Field;
+        InitFieldIndex.clear();
+        CheckInitListExpr(ILE);
+      } else {
+        InitList = false;
+        Visit(E);
+      }
+
+      if (Field)
+        Decls.erase(Field);
+      if (BaseClass)
+        BaseClasses.erase(BaseClass->getCanonicalTypeInternal());
     }
 
     void VisitMemberExpr(MemberExpr *ME) {
       // All uses of unbounded reference fields will warn.
-      HandleMemberExpr(ME, true /*CheckReferenceOnly*/);
-
-      Inherited::VisitMemberExpr(ME);
+      HandleMemberExpr(ME, true /*CheckReferenceOnly*/, false /*AddressOf*/);
     }
 
     void VisitImplicitCastExpr(ImplicitCastExpr *E) {
-      if (E->getCastKind() == CK_LValueToRValue)
-        HandleValue(E->getSubExpr());
+      if (E->getCastKind() == CK_LValueToRValue) {
+        HandleValue(E->getSubExpr(), false /*AddressOf*/);
+        return;
+      }
 
       Inherited::VisitImplicitCastExpr(E);
     }
 
     void VisitCXXConstructExpr(CXXConstructExpr *E) {
-      if (E->getConstructor()->isCopyConstructor())
-        if (ImplicitCastExpr* ICE = dyn_cast<ImplicitCastExpr>(E->getArg(0)))
+      if (E->getConstructor()->isCopyConstructor()) {
+        Expr *ArgExpr = E->getArg(0);
+        if (InitListExpr *ILE = dyn_cast<InitListExpr>(ArgExpr))
+          if (ILE->getNumInits() == 1)
+            ArgExpr = ILE->getInit(0);
+        if (ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(ArgExpr))
           if (ICE->getCastKind() == CK_NoOp)
-            if (MemberExpr *ME = dyn_cast<MemberExpr>(ICE->getSubExpr()))
-              HandleMemberExpr(ME, false /*CheckReferenceOnly*/);
-      
+            ArgExpr = ICE->getSubExpr();
+        HandleValue(ArgExpr, false /*AddressOf*/);
+        return;
+      }
       Inherited::VisitCXXConstructExpr(E);
     }
 
     void VisitCXXMemberCallExpr(CXXMemberCallExpr *E) {
       Expr *Callee = E->getCallee();
-      if (isa<MemberExpr>(Callee))
-        HandleValue(Callee);
+      if (isa<MemberExpr>(Callee)) {
+        HandleValue(Callee, false /*AddressOf*/);
+        for (auto Arg : E->arguments())
+          Visit(Arg);
+        return;
+      }
 
       Inherited::VisitCXXMemberCallExpr(E);
+    }
+
+    void VisitCallExpr(CallExpr *E) {
+      // Treat std::move as a use.
+      if (E->getNumArgs() == 1) {
+        if (FunctionDecl *FD = E->getDirectCallee()) {
+          if (FD->isInStdNamespace() && FD->getIdentifier() &&
+              FD->getIdentifier()->isStr("move")) {
+            HandleValue(E->getArg(0), false /*AddressOf*/);
+            return;
+          }
+        }
+      }
+
+      Inherited::VisitCallExpr(E);
+    }
+
+    void VisitCXXOperatorCallExpr(CXXOperatorCallExpr *E) {
+      Expr *Callee = E->getCallee();
+
+      if (isa<UnresolvedLookupExpr>(Callee))
+        return Inherited::VisitCXXOperatorCallExpr(E);
+
+      Visit(Callee);
+      for (auto Arg : E->arguments())
+        HandleValue(Arg->IgnoreParenImpCasts(), false /*AddressOf*/);
     }
 
     void VisitBinaryOperator(BinaryOperator *E) {
@@ -2340,30 +2582,32 @@ namespace {
         if (MemberExpr *ME = dyn_cast<MemberExpr>(E->getLHS()))
           if (FieldDecl *FD = dyn_cast<FieldDecl>(ME->getMemberDecl()))
             if (!FD->getType()->isReferenceType())
-              Decls.erase(FD);
+              DeclsToRemove.push_back(FD);
+
+      if (E->isCompoundAssignmentOp()) {
+        HandleValue(E->getLHS(), false /*AddressOf*/);
+        Visit(E->getRHS());
+        return;
+      }
 
       Inherited::VisitBinaryOperator(E);
     }
-  };
-  static void CheckInitExprContainsUninitializedFields(
-      Sema &S, Expr *E, llvm::SmallPtrSet<ValueDecl*, 4> &Decls,
-      const CXXConstructorDecl *Constructor) {
-    if (Decls.size() == 0)
-      return;
 
-    if (!E)
-      return;
-
-    if (CXXDefaultInitExpr *Default = dyn_cast<CXXDefaultInitExpr>(E)) {
-      E = Default->getExpr();
-      if (!E)
+    void VisitUnaryOperator(UnaryOperator *E) {
+      if (E->isIncrementDecrementOp()) {
+        HandleValue(E->getSubExpr(), false /*AddressOf*/);
         return;
-      // In class initializers will point to the constructor.
-      UninitializedFieldVisitor(S, Decls, Constructor).Visit(E);
-    } else {
-      UninitializedFieldVisitor(S, Decls, nullptr).Visit(E);
+      }
+      if (E->getOpcode() == UO_AddrOf) {
+        if (MemberExpr *ME = dyn_cast<MemberExpr>(E->getSubExpr())) {
+          HandleValue(ME->getBase(), true /*AddressOf*/);
+          return;
+        }
+      }
+
+      Inherited::VisitUnaryOperator(E);
     }
-  }
+  };
 
   // Diagnose value-uses of fields to initialize themselves, e.g.
   //   foo(foo)
@@ -2384,6 +2628,9 @@ namespace {
 
     const CXXRecordDecl *RD = Constructor->getParent();
 
+    if (RD->getDescribedClassTemplate())
+      return;
+
     // Holds fields that are uninitialized.
     llvm::SmallPtrSet<ValueDecl*, 4> UninitializedFields;
 
@@ -2396,14 +2643,39 @@ namespace {
       }
     }
 
+    llvm::SmallPtrSet<QualType, 4> UninitializedBaseClasses;
+    for (auto I : RD->bases())
+      UninitializedBaseClasses.insert(I.getType().getCanonicalType());
+
+    if (UninitializedFields.empty() && UninitializedBaseClasses.empty())
+      return;
+
+    UninitializedFieldVisitor UninitializedChecker(SemaRef,
+                                                   UninitializedFields,
+                                                   UninitializedBaseClasses);
+
     for (const auto *FieldInit : Constructor->inits()) {
+      if (UninitializedFields.empty() && UninitializedBaseClasses.empty())
+        break;
+
       Expr *InitExpr = FieldInit->getInit();
+      if (!InitExpr)
+        continue;
 
-      CheckInitExprContainsUninitializedFields(
-          SemaRef, InitExpr, UninitializedFields, Constructor);
-
-      if (FieldDecl *Field = FieldInit->getAnyMember())
-        UninitializedFields.erase(Field);
+      if (CXXDefaultInitExpr *Default =
+              dyn_cast<CXXDefaultInitExpr>(InitExpr)) {
+        InitExpr = Default->getExpr();
+        if (!InitExpr)
+          continue;
+        // In class initializers will point to the constructor.
+        UninitializedChecker.CheckInitializer(InitExpr, Constructor,
+                                              FieldInit->getAnyMember(),
+                                              FieldInit->getBaseClass());
+      } else {
+        UninitializedChecker.CheckInitializer(InitExpr, nullptr,
+                                              FieldInit->getAnyMember(),
+                                              FieldInit->getBaseClass());
+      }
     }
   }
 } // namespace
@@ -2426,13 +2698,14 @@ void Sema::ActOnFinishCXXInClassMemberInitializer(Decl *D,
   // Pop the notional constructor scope we created earlier.
   PopFunctionScopeInfo(nullptr, D);
 
-  FieldDecl *FD = cast<FieldDecl>(D);
-  assert(FD->getInClassInitStyle() != ICIS_NoInit &&
+  FieldDecl *FD = dyn_cast<FieldDecl>(D);
+  assert((isa<MSPropertyDecl>(D) || FD->getInClassInitStyle() != ICIS_NoInit) &&
          "must set init style when field is created");
 
   if (!InitExpr) {
-    FD->setInvalidDecl();
-    FD->removeInClassInitializer();
+    D->setInvalidDecl();
+    if (FD)
+      FD->removeInClassInitializer();
     return;
   }
 
@@ -2498,7 +2771,8 @@ static bool FindBaseInitializer(Sema &SemaRef,
     // virtual base class.
     CXXBasePaths Paths(/*FindAmbiguities=*/true, /*RecordPaths=*/true,
                        /*DetectVirtual=*/false);
-    if (SemaRef.IsDerivedFrom(SemaRef.Context.getTypeDeclType(ClassDecl), 
+    if (SemaRef.IsDerivedFrom(ClassDecl->getLocation(),
+                              SemaRef.Context.getTypeDeclType(ClassDecl),
                               BaseType, Paths)) {
       for (CXXBasePaths::paths_iterator Path = Paths.begin();
            Path != Paths.end(); ++Path) {
@@ -2583,6 +2857,11 @@ Sema::BuildMemInitializer(Decl *ConstructorD,
                           SourceLocation IdLoc,
                           Expr *Init,
                           SourceLocation EllipsisLoc) {
+  ExprResult Res = CorrectDelayedTyposInExpr(Init);
+  if (!Res.isUsable())
+    return true;
+  Init = Res.get();
+
   if (!ConstructorD)
     return true;
 
@@ -2612,8 +2891,7 @@ Sema::BuildMemInitializer(Decl *ConstructorD,
   //   using a qualified name. ]
   if (!SS.getScopeRep() && !TemplateTypeTy) {
     // Look for a member, first.
-    DeclContext::lookup_result Result
-      = ClassDecl->lookup(MemberOrBase);
+    DeclContext::lookup_result Result = ClassDecl->lookup(MemberOrBase);
     if (!Result.empty()) {
       ValueDecl *Member;
       if ((Member = dyn_cast<FieldDecl>(Result.front())) ||
@@ -2668,10 +2946,11 @@ Sema::BuildMemInitializer(Decl *ConstructorD,
 
       // If no results were found, try to correct typos.
       TypoCorrection Corr;
-      MemInitializerValidatorCCC Validator(ClassDecl);
       if (R.empty() && BaseType.isNull() &&
-          (Corr = CorrectTypo(R.getLookupNameInfo(), R.getLookupKind(), S, &SS,
-                              Validator, CTK_ErrorRecovery, ClassDecl))) {
+          (Corr = CorrectTypo(
+               R.getLookupNameInfo(), R.getLookupKind(), S, &SS,
+               llvm::make_unique<MemInitializerValidatorCCC>(ClassDecl),
+               CTK_ErrorRecovery, ClassDecl))) {
         if (FieldDecl *Member = Corr.getCorrectionDeclAs<FieldDecl>()) {
           // We have found a non-static data member with a similar
           // name to what was typed; complain and initialize that
@@ -2715,10 +2994,16 @@ Sema::BuildMemInitializer(Decl *ConstructorD,
 
     if (BaseType.isNull()) {
       BaseType = Context.getTypeDeclType(TyD);
-      if (SS.isSet())
-        // FIXME: preserve source range information
+      MarkAnyDeclReferenced(TyD->getLocation(), TyD, /*OdrUse=*/false);
+      if (SS.isSet()) {
         BaseType = Context.getElaboratedType(ETK_None, SS.getScopeRep(),
                                              BaseType);
+        TInfo = Context.CreateTypeSourceInfo(BaseType);
+        ElaboratedTypeLoc TL = TInfo->getTypeLoc().castAs<ElaboratedTypeLoc>();
+        TL.getNamedTypeLoc().castAs<TypeSpecTypeLoc>().setNameLoc(IdLoc);
+        TL.setElaboratedKeywordLoc(SourceLocation());
+        TL.setQualifierLoc(SS.getWithLocInContext(Context));
+      }
     }
   }
 
@@ -3074,34 +3359,7 @@ BuildImplicitBaseInitializer(Sema &SemaRef, CXXConstructorDecl *Constructor,
   ExprResult BaseInit;
   
   switch (ImplicitInitKind) {
-  case IIK_Inherit: {
-    const CXXRecordDecl *Inherited =
-        Constructor->getInheritedConstructor()->getParent();
-    const CXXRecordDecl *Base = BaseSpec->getType()->getAsCXXRecordDecl();
-    if (Base && Inherited->getCanonicalDecl() == Base->getCanonicalDecl()) {
-      // C++11 [class.inhctor]p8:
-      //   Each expression in the expression-list is of the form
-      //   static_cast<T&&>(p), where p is the name of the corresponding
-      //   constructor parameter and T is the declared type of p.
-      SmallVector<Expr*, 16> Args;
-      for (unsigned I = 0, E = Constructor->getNumParams(); I != E; ++I) {
-        ParmVarDecl *PD = Constructor->getParamDecl(I);
-        ExprResult ArgExpr =
-            SemaRef.BuildDeclRefExpr(PD, PD->getType().getNonReferenceType(),
-                                     VK_LValue, SourceLocation());
-        if (ArgExpr.isInvalid())
-          return true;
-        Args.push_back(CastForMoving(SemaRef, ArgExpr.get(), PD->getType()));
-      }
-
-      InitializationKind InitKind = InitializationKind::CreateDirect(
-          Constructor->getLocation(), SourceLocation(), SourceLocation());
-      InitializationSequence InitSeq(SemaRef, InitEntity, InitKind, Args);
-      BaseInit = InitSeq.Perform(SemaRef, InitEntity, InitKind, Args);
-      break;
-    }
-  }
-  // Fall through.
+  case IIK_Inherit:
   case IIK_Default: {
     InitializationKind InitKind
       = InitializationKind::CreateDefault(Constructor->getLocation());
@@ -3216,7 +3474,8 @@ BuildImplicitMemberInitializer(Sema &SemaRef, CXXConstructorDecl *Constructor,
                                          /*TemplateKWLoc=*/SourceLocation(),
                                          /*FirstQualifierInScope=*/nullptr,
                                          MemberLookup,
-                                         /*TemplateArgs=*/nullptr);
+                                         /*TemplateArgs=*/nullptr,
+                                         /*S*/nullptr);
     if (CtorArg.isInvalid())
       return true;
 
@@ -3295,8 +3554,9 @@ BuildImplicitMemberInitializer(Sema &SemaRef, CXXConstructorDecl *Constructor,
       InitializationKind::CreateDirect(Loc, SourceLocation(), SourceLocation());
     
     Expr *CtorArgE = CtorArg.getAs<Expr>();
-    InitializationSequence InitSeq(SemaRef, Entities.back(), InitKind, CtorArgE);
-    
+    InitializationSequence InitSeq(SemaRef, Entities.back(), InitKind,
+                                   CtorArgE);
+
     ExprResult MemberInit
       = InitSeq.Perform(SemaRef, Entities.back(), InitKind, 
                         MultiExprArg(&CtorArgE, 1));
@@ -3410,12 +3670,12 @@ struct BaseAndFieldInfo {
   BaseAndFieldInfo(Sema &S, CXXConstructorDecl *Ctor, bool ErrorsInInits)
     : S(S), Ctor(Ctor), AnyErrorsInInits(ErrorsInInits) {
     bool Generated = Ctor->isImplicit() || Ctor->isDefaulted();
-    if (Generated && Ctor->isCopyConstructor())
+    if (Ctor->getInheritedConstructor())
+      IIK = IIK_Inherit;
+    else if (Generated && Ctor->isCopyConstructor())
       IIK = IIK_Copy;
     else if (Generated && Ctor->isMoveConstructor())
       IIK = IIK_Move;
-    else if (Ctor->getInheritedConstructor())
-      IIK = IIK_Inherit;
     else
       IIK = IIK_Default;
   }
@@ -3530,19 +3790,19 @@ static bool CollectFieldInitializer(Sema &SemaRef, BaseAndFieldInfo &Info,
     return false;
 
   if (Field->hasInClassInitializer() && !Info.isImplicitCopyOrMove()) {
-    Expr *DIE = CXXDefaultInitExpr::Create(SemaRef.Context,
-                                           Info.Ctor->getLocation(), Field);
+    ExprResult DIE =
+        SemaRef.BuildCXXDefaultInitExpr(Info.Ctor->getLocation(), Field);
+    if (DIE.isInvalid())
+      return true;
     CXXCtorInitializer *Init;
     if (Indirect)
-      Init = new (SemaRef.Context) CXXCtorInitializer(SemaRef.Context, Indirect,
-                                                      SourceLocation(),
-                                                      SourceLocation(), DIE,
-                                                      SourceLocation());
+      Init = new (SemaRef.Context)
+          CXXCtorInitializer(SemaRef.Context, Indirect, SourceLocation(),
+                             SourceLocation(), DIE.get(), SourceLocation());
     else
-      Init = new (SemaRef.Context) CXXCtorInitializer(SemaRef.Context, Field,
-                                                      SourceLocation(),
-                                                      SourceLocation(), DIE,
-                                                      SourceLocation());
+      Init = new (SemaRef.Context)
+          CXXCtorInitializer(SemaRef.Context, Field, SourceLocation(),
+                             SourceLocation(), DIE.get(), SourceLocation());
     return Info.addFieldInitializer(Init);
   }
 
@@ -3583,6 +3843,8 @@ Sema::SetDelegatingInitializer(CXXConstructorDecl *Constructor,
   }
 
   DelegatingCtorDecls.push_back(Constructor);
+
+  DiagnoseUninitializedFields(*this, Constructor);
 
   return false;
 }
@@ -3870,7 +4132,7 @@ static void DiagnoseBaseOrMemInitializerOrder(
         if (InitKey == IdealInitKeys[IdealIndex])
           break;
 
-      assert(IdealIndex != NumIdealInits &&
+      assert(IdealIndex < NumIdealInits &&
              "initializer not found in initializer list");
     }
 
@@ -4137,64 +4399,35 @@ void Sema::ActOnDefaultCtorInitializers(Decl *CDtorDecl) {
   }
 }
 
-bool Sema::RequireNonAbstractType(SourceLocation Loc, QualType T,
-                                  unsigned DiagID, AbstractDiagSelID SelID) {
-  class NonAbstractTypeDiagnoser : public TypeDiagnoser {
-    unsigned DiagID;
-    AbstractDiagSelID SelID;
-    
-  public:
-    NonAbstractTypeDiagnoser(unsigned DiagID, AbstractDiagSelID SelID)
-      : TypeDiagnoser(DiagID == 0), DiagID(DiagID), SelID(SelID) { }
-
-    void diagnose(Sema &S, SourceLocation Loc, QualType T) override {
-      if (Suppressed) return;
-      if (SelID == -1)
-        S.Diag(Loc, DiagID) << T;
-      else
-        S.Diag(Loc, DiagID) << SelID << T;
-    }
-  } Diagnoser(DiagID, SelID);
-  
-  return RequireNonAbstractType(Loc, T, Diagnoser);
-}
-
-bool Sema::RequireNonAbstractType(SourceLocation Loc, QualType T,
-                                  TypeDiagnoser &Diagnoser) {
+bool Sema::isAbstractType(SourceLocation Loc, QualType T) {
   if (!getLangOpts().CPlusPlus)
     return false;
 
-  if (const ArrayType *AT = Context.getAsArrayType(T))
-    return RequireNonAbstractType(Loc, AT->getElementType(), Diagnoser);
-
-  if (const PointerType *PT = T->getAs<PointerType>()) {
-    // Find the innermost pointer type.
-    while (const PointerType *T = PT->getPointeeType()->getAs<PointerType>())
-      PT = T;
-
-    if (const ArrayType *AT = Context.getAsArrayType(PT->getPointeeType()))
-      return RequireNonAbstractType(Loc, AT->getElementType(), Diagnoser);
-  }
-
-  const RecordType *RT = T->getAs<RecordType>();
-  if (!RT)
+  const auto *RD = Context.getBaseElementType(T)->getAsCXXRecordDecl();
+  if (!RD)
     return false;
 
-  const CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
+  // FIXME: Per [temp.inst]p1, we are supposed to trigger instantiation of a
+  // class template specialization here, but doing so breaks a lot of code.
 
   // We can't answer whether something is abstract until it has a
-  // definition.  If it's currently being defined, we'll walk back
+  // definition. If it's currently being defined, we'll walk back
   // over all the declarations when we have a full definition.
   const CXXRecordDecl *Def = RD->getDefinition();
   if (!Def || Def->isBeingDefined())
     return false;
 
-  if (!RD->isAbstract())
+  return RD->isAbstract();
+}
+
+bool Sema::RequireNonAbstractType(SourceLocation Loc, QualType T,
+                                  TypeDiagnoser &Diagnoser) {
+  if (!isAbstractType(Loc, T))
     return false;
 
+  T = Context.getBaseElementType(T);
   Diagnoser.diagnose(*this, Loc, T);
-  DiagnoseAbstractType(RD);
-
+  DiagnoseAbstractType(T->getAsCXXRecordDecl());
   return true;
 }
 
@@ -4236,7 +4469,7 @@ void Sema::DiagnoseAbstractType(const CXXRecordDecl *RD) {
       if (!SO->second.front().Method->isPure())
         continue;
 
-      if (!SeenPureMethods.insert(SO->second.front().Method))
+      if (!SeenPureMethods.insert(SO->second.front().Method).second)
         continue;
 
       Diag(SO->second.front().Method->getLocation(), 
@@ -4414,16 +4647,121 @@ static void CheckAbstractClassUsage(AbstractUsageInfo &Info,
   }
 }
 
-/// \brief Check class-level dllimport/dllexport attribute.
-static void checkDLLAttribute(Sema &S, CXXRecordDecl *Class) {
+static void ReferenceDllExportedMethods(Sema &S, CXXRecordDecl *Class) {
   Attr *ClassAttr = getDLLAttr(Class);
   if (!ClassAttr)
     return;
 
-  bool ClassExported = ClassAttr->getKind() == attr::DLLExport;
+  assert(ClassAttr->getKind() == attr::DLLExport);
+
+  TemplateSpecializationKind TSK = Class->getTemplateSpecializationKind();
+
+  if (TSK == TSK_ExplicitInstantiationDeclaration)
+    // Don't go any further if this is just an explicit instantiation
+    // declaration.
+    return;
+
+  for (Decl *Member : Class->decls()) {
+    auto *MD = dyn_cast<CXXMethodDecl>(Member);
+    if (!MD)
+      continue;
+
+    if (Member->getAttr<DLLExportAttr>()) {
+      if (MD->isUserProvided()) {
+        // Instantiate non-default class member functions ...
+
+        // .. except for certain kinds of template specializations.
+        if (TSK == TSK_ImplicitInstantiation && !ClassAttr->isInherited())
+          continue;
+
+        S.MarkFunctionReferenced(Class->getLocation(), MD);
+
+        // The function will be passed to the consumer when its definition is
+        // encountered.
+      } else if (!MD->isTrivial() || MD->isExplicitlyDefaulted() ||
+                 MD->isCopyAssignmentOperator() ||
+                 MD->isMoveAssignmentOperator()) {
+        // Synthesize and instantiate non-trivial implicit methods, explicitly
+        // defaulted methods, and the copy and move assignment operators. The
+        // latter are exported even if they are trivial, because the address of
+        // an operator can be taken and should compare equal accross libraries.
+        DiagnosticErrorTrap Trap(S.Diags);
+        S.MarkFunctionReferenced(Class->getLocation(), MD);
+        if (Trap.hasErrorOccurred()) {
+          S.Diag(ClassAttr->getLocation(), diag::note_due_to_dllexported_class)
+              << Class->getName() << !S.getLangOpts().CPlusPlus11;
+          break;
+        }
+
+        // There is no later point when we will see the definition of this
+        // function, so pass it to the consumer now.
+        S.Consumer.HandleTopLevelDecl(DeclGroupRef(MD));
+      }
+    }
+  }
+}
+
+/// \brief Check class-level dllimport/dllexport attribute.
+void Sema::checkClassLevelDLLAttribute(CXXRecordDecl *Class) {
+  Attr *ClassAttr = getDLLAttr(Class);
+
+  // MSVC inherits DLL attributes to partial class template specializations.
+  if (Context.getTargetInfo().getCXXABI().isMicrosoft() && !ClassAttr) {
+    if (auto *Spec = dyn_cast<ClassTemplatePartialSpecializationDecl>(Class)) {
+      if (Attr *TemplateAttr =
+              getDLLAttr(Spec->getSpecializedTemplate()->getTemplatedDecl())) {
+        auto *A = cast<InheritableAttr>(TemplateAttr->clone(getASTContext()));
+        A->setInherited(true);
+        ClassAttr = A;
+      }
+    }
+  }
+
+  if (!ClassAttr)
+    return;
+
+  if (!Class->isExternallyVisible()) {
+    Diag(Class->getLocation(), diag::err_attribute_dll_not_extern)
+        << Class << ClassAttr;
+    return;
+  }
+
+  if (Context.getTargetInfo().getCXXABI().isMicrosoft() &&
+      !ClassAttr->isInherited()) {
+    // Diagnose dll attributes on members of class with dll attribute.
+    for (Decl *Member : Class->decls()) {
+      if (!isa<VarDecl>(Member) && !isa<CXXMethodDecl>(Member))
+        continue;
+      InheritableAttr *MemberAttr = getDLLAttr(Member);
+      if (!MemberAttr || MemberAttr->isInherited() || Member->isInvalidDecl())
+        continue;
+
+      Diag(MemberAttr->getLocation(),
+             diag::err_attribute_dll_member_of_dll_class)
+          << MemberAttr << ClassAttr;
+      Diag(ClassAttr->getLocation(), diag::note_previous_attribute);
+      Member->setInvalidDecl();
+    }
+  }
+
+  if (Class->getDescribedClassTemplate())
+    // Don't inherit dll attribute until the template is instantiated.
+    return;
+
+  // The class is either imported or exported.
+  const bool ClassExported = ClassAttr->getKind() == attr::DLLExport;
+
+  TemplateSpecializationKind TSK = Class->getTemplateSpecializationKind();
+
+  // Ignore explicit dllexport on explicit class template instantiation declarations.
+  if (ClassExported && !ClassAttr->isInherited() &&
+      TSK == TSK_ExplicitInstantiationDeclaration) {
+    Class->dropAttr<DLLExportAttr>();
+    return;
+  }
 
   // Force declaration of implicit members so they can inherit the attribute.
-  S.ForceDeclarationOfImplicitMembers(Class);
+  ForceDeclarationOfImplicitMembers(Class);
 
   // FIXME: MSVC's docs say all bases must be exportable, but this doesn't
   // seem to be true in practice?
@@ -4436,52 +4774,127 @@ static void checkDLLAttribute(Sema &S, CXXRecordDecl *Class) {
     if (!VD && !MD)
       continue;
 
-    // Don't process deleted methods.
-    if (MD && MD->isDeleted())
-      continue;
+    if (MD) {
+      // Don't process deleted methods.
+      if (MD->isDeleted())
+        continue;
 
-    if (MD && MD->isMoveAssignmentOperator() && !ClassExported &&
-        MD->isInlined()) {
-      // Current MSVC versions don't export the move assignment operators, so
-      // don't attempt to import them if we have a definition.
-      continue;
+      if (MD->isInlined()) {
+        // MinGW does not import or export inline methods.
+        if (!Context.getTargetInfo().getCXXABI().isMicrosoft())
+          continue;
+
+        // MSVC versions before 2015 don't export the move assignment operators
+        // and move constructor, so don't attempt to import/export them if
+        // we have a definition.
+        auto *Ctor = dyn_cast<CXXConstructorDecl>(MD);
+        if ((MD->isMoveAssignmentOperator() ||
+             (Ctor && Ctor->isMoveConstructor())) &&
+            !getLangOpts().isCompatibleWithMSVC(LangOptions::MSVC2015))
+          continue;
+
+        // MSVC2015 doesn't export trivial defaulted x-tor but copy assign
+        // operator is exported anyway.
+        if (getLangOpts().isCompatibleWithMSVC(LangOptions::MSVC2015) &&
+            (Ctor || isa<CXXDestructorDecl>(MD)) && MD->isTrivial())
+          continue;
+      }
     }
 
-    if (InheritableAttr *MemberAttr = getDLLAttr(Member)) {
-      if (S.Context.getTargetInfo().getCXXABI().isMicrosoft() &&
-          !MemberAttr->isInherited() && !ClassAttr->isInherited()) {
-        S.Diag(MemberAttr->getLocation(),
-               diag::err_attribute_dll_member_of_dll_class)
-            << MemberAttr << ClassAttr;
-        S.Diag(ClassAttr->getLocation(), diag::note_previous_attribute);
-        Member->setInvalidDecl();
-        continue;
-      }
-    } else {
+    if (!cast<NamedDecl>(Member)->isExternallyVisible())
+      continue;
+
+    if (!getDLLAttr(Member)) {
       auto *NewAttr =
-          cast<InheritableAttr>(ClassAttr->clone(S.getASTContext()));
+          cast<InheritableAttr>(ClassAttr->clone(getASTContext()));
       NewAttr->setInherited(true);
       Member->addAttr(NewAttr);
     }
+  }
 
-    if (CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(Member)) {
-      if (ClassExported) {
-        if (MD->isUserProvided()) {
-          // Instantiate non-default methods.
-          S.MarkFunctionReferenced(Class->getLocation(), MD);
-        } else if (!MD->isTrivial() || MD->isExplicitlyDefaulted() ||
-                   MD->isCopyAssignmentOperator() ||
-                   MD->isMoveAssignmentOperator()) {
-          // Instantiate non-trivial or explicitly defaulted methods, and the
-          // copy assignment / move assignment operators.
-          S.MarkFunctionReferenced(Class->getLocation(), MD);
-          // Resolve its exception specification; CodeGen needs it.
-          auto *FPT = MD->getType()->getAs<FunctionProtoType>();
-          S.ResolveExceptionSpec(Class->getLocation(), FPT);
-          S.ActOnFinishInlineMethodDef(MD);
-        }
-      }
-    }
+  if (ClassExported)
+    DelayedDllExportClasses.push_back(Class);
+}
+
+/// \brief Perform propagation of DLL attributes from a derived class to a
+/// templated base class for MS compatibility.
+void Sema::propagateDLLAttrToBaseClassTemplate(
+    CXXRecordDecl *Class, Attr *ClassAttr,
+    ClassTemplateSpecializationDecl *BaseTemplateSpec, SourceLocation BaseLoc) {
+  if (getDLLAttr(
+          BaseTemplateSpec->getSpecializedTemplate()->getTemplatedDecl())) {
+    // If the base class template has a DLL attribute, don't try to change it.
+    return;
+  }
+
+  auto TSK = BaseTemplateSpec->getSpecializationKind();
+  if (!getDLLAttr(BaseTemplateSpec) &&
+      (TSK == TSK_Undeclared || TSK == TSK_ExplicitInstantiationDeclaration ||
+       TSK == TSK_ImplicitInstantiation)) {
+    // The template hasn't been instantiated yet (or it has, but only as an
+    // explicit instantiation declaration or implicit instantiation, which means
+    // we haven't codegenned any members yet), so propagate the attribute.
+    auto *NewAttr = cast<InheritableAttr>(ClassAttr->clone(getASTContext()));
+    NewAttr->setInherited(true);
+    BaseTemplateSpec->addAttr(NewAttr);
+
+    // If the template is already instantiated, checkDLLAttributeRedeclaration()
+    // needs to be run again to work see the new attribute. Otherwise this will
+    // get run whenever the template is instantiated.
+    if (TSK != TSK_Undeclared)
+      checkClassLevelDLLAttribute(BaseTemplateSpec);
+
+    return;
+  }
+
+  if (getDLLAttr(BaseTemplateSpec)) {
+    // The template has already been specialized or instantiated with an
+    // attribute, explicitly or through propagation. We should not try to change
+    // it.
+    return;
+  }
+
+  // The template was previously instantiated or explicitly specialized without
+  // a dll attribute, It's too late for us to add an attribute, so warn that
+  // this is unsupported.
+  Diag(BaseLoc, diag::warn_attribute_dll_instantiated_base_class)
+      << BaseTemplateSpec->isExplicitSpecialization();
+  Diag(ClassAttr->getLocation(), diag::note_attribute);
+  if (BaseTemplateSpec->isExplicitSpecialization()) {
+    Diag(BaseTemplateSpec->getLocation(),
+           diag::note_template_class_explicit_specialization_was_here)
+        << BaseTemplateSpec;
+  } else {
+    Diag(BaseTemplateSpec->getPointOfInstantiation(),
+           diag::note_template_class_instantiation_was_here)
+        << BaseTemplateSpec;
+  }
+}
+
+static void DefineImplicitSpecialMember(Sema &S, CXXMethodDecl *MD,
+                                        SourceLocation DefaultLoc) {
+  switch (S.getSpecialMember(MD)) {
+  case Sema::CXXDefaultConstructor:
+    S.DefineImplicitDefaultConstructor(DefaultLoc,
+                                       cast<CXXConstructorDecl>(MD));
+    break;
+  case Sema::CXXCopyConstructor:
+    S.DefineImplicitCopyConstructor(DefaultLoc, cast<CXXConstructorDecl>(MD));
+    break;
+  case Sema::CXXCopyAssignment:
+    S.DefineImplicitCopyAssignment(DefaultLoc, MD);
+    break;
+  case Sema::CXXDestructor:
+    S.DefineImplicitDestructor(DefaultLoc, cast<CXXDestructorDecl>(MD));
+    break;
+  case Sema::CXXMoveConstructor:
+    S.DefineImplicitMoveConstructor(DefaultLoc, cast<CXXConstructorDecl>(MD));
+    break;
+  case Sema::CXXMoveAssignment:
+    S.DefineImplicitMoveAssignment(DefaultLoc, MD);
+    break;
+  case Sema::CXXInvalid:
+    llvm_unreachable("Invalid special member.");
   }
 }
 
@@ -4523,9 +4936,6 @@ void Sema::CheckCompletedCXXClass(CXXRecordDecl *Record) {
     }
   }
 
-  if (Record->isDynamicClass() && !Record->isDependentType())
-    DynamicClasses.push_back(Record);
-
   if (Record->getIdentifier()) {
     // C++ [class.mem]p13:
     //   If T is the name of a class, then each of the following shall have a 
@@ -4565,21 +4975,26 @@ void Sema::CheckCompletedCXXClass(CXXRecordDecl *Record) {
     }
   }
 
+  bool HasMethodWithOverrideControl = false,
+       HasOverridingMethodWithoutOverrideControl = false;
   if (!Record->isDependentType()) {
     for (auto *M : Record->methods()) {
       // See if a method overloads virtual methods in a base
       // class without overriding any.
       if (!M->isStatic())
         DiagnoseHiddenVirtualMethods(M);
-
+      if (M->hasAttr<OverrideAttr>())
+        HasMethodWithOverrideControl = true;
+      else if (M->size_overridden_methods() > 0)
+        HasOverridingMethodWithoutOverrideControl = true;
       // Check whether the explicitly-defaulted special members are valid.
       if (!M->isInvalidDecl() && M->isExplicitlyDefaulted())
         CheckExplicitlyDefaultedSpecialMember(M);
 
       // For an explicitly defaulted or deleted special member, we defer
       // determining triviality until the class is complete. That time is now!
+      CXXSpecialMember CSM = getSpecialMember(M);
       if (!M->isImplicit() && !M->isUserProvided()) {
-        CXXSpecialMember CSM = getSpecialMember(M);
         if (CSM != CXXInvalid) {
           M->setTrivial(SpecialMemberIsTrivial(M, CSM));
 
@@ -4587,44 +5002,29 @@ void Sema::CheckCompletedCXXClass(CXXRecordDecl *Record) {
           Record->finishedDefaultedOrDeletedMember(M);
         }
       }
+
+      if (!M->isInvalidDecl() && M->isExplicitlyDefaulted() &&
+          M->hasAttr<DLLExportAttr>()) {
+        if (getLangOpts().isCompatibleWithMSVC(LangOptions::MSVC2015) &&
+            M->isTrivial() &&
+            (CSM == CXXDefaultConstructor || CSM == CXXCopyConstructor ||
+             CSM == CXXDestructor))
+          M->dropAttr<DLLExportAttr>();
+
+        if (M->hasAttr<DLLExportAttr>()) {
+          DefineImplicitSpecialMember(*this, M, M->getLocation());
+          ActOnFinishInlineFunctionDef(M);
+        }
+      }
     }
   }
 
-  // C++11 [dcl.constexpr]p8: A constexpr specifier for a non-static member
-  // function that is not a constructor declares that member function to be
-  // const. [...] The class of which that function is a member shall be
-  // a literal type.
-  //
-  // If the class has virtual bases, any constexpr members will already have
-  // been diagnosed by the checks performed on the member declaration, so
-  // suppress this (less useful) diagnostic.
-  //
-  // We delay this until we know whether an explicitly-defaulted (or deleted)
-  // destructor for the class is trivial.
-  if (LangOpts.CPlusPlus11 && !Record->isDependentType() &&
-      !Record->isLiteral() && !Record->getNumVBases()) {
-    for (const auto *M : Record->methods()) {
-      if (M->isConstexpr() && M->isInstance() && !isa<CXXConstructorDecl>(M)) {
-        switch (Record->getTemplateSpecializationKind()) {
-        case TSK_ImplicitInstantiation:
-        case TSK_ExplicitInstantiationDeclaration:
-        case TSK_ExplicitInstantiationDefinition:
-          // If a template instantiates to a non-literal type, but its members
-          // instantiate to constexpr functions, the template is technically
-          // ill-formed, but we allow it for sanity.
-          continue;
-
-        case TSK_Undeclared:
-        case TSK_ExplicitSpecialization:
-          RequireLiteralType(M->getLocation(), Context.getRecordType(Record),
-                             diag::err_constexpr_method_non_literal);
-          break;
-        }
-
-        // Only produce one error per class.
-        break;
-      }
-    }
+  if (HasMethodWithOverrideControl &&
+      HasOverridingMethodWithoutOverrideControl) {
+    // At least one method has the 'override' control declared.
+    // Diagnose all other overridden methods which do not have 'override' specified on them.
+    for (auto *M : Record->methods())
+      DiagnoseAbsenceOfOverrideControl(M);
   }
 
   // ms_struct is a request to use the same ABI rules as MSVC.  Check
@@ -4641,16 +5041,7 @@ void Sema::CheckCompletedCXXClass(CXXRecordDecl *Record) {
     Diag(Record->getLocation(), diag::warn_cxx_ms_struct);
   }
 
-  // Declare inheriting constructors. We do this eagerly here because:
-  // - The standard requires an eager diagnostic for conflicting inheriting
-  //   constructors from different classes.
-  // - The lazy declaration of the other implicit constructors is so as to not
-  //   waste space and performance on classes that are not meant to be
-  //   instantiated (e.g. meta-functions). This doesn't apply to classes that
-  //   have inheriting constructors.
-  DeclareInheritingConstructors(Record);
-
-  checkDLLAttribute(*this, Record);
+  checkClassLevelDLLAttribute(Record);
 }
 
 /// Look up the special member function that would be called by a special
@@ -4683,11 +5074,108 @@ static Sema::SpecialMemberOverloadResult *lookupCallFromSpecialMember(
                                LHSQuals & Qualifiers::Volatile);
 }
 
+class Sema::InheritedConstructorInfo {
+  Sema &S;
+  SourceLocation UseLoc;
+
+  /// A mapping from the base classes through which the constructor was
+  /// inherited to the using shadow declaration in that base class (or a null
+  /// pointer if the constructor was declared in that base class).
+  llvm::DenseMap<CXXRecordDecl *, ConstructorUsingShadowDecl *>
+      InheritedFromBases;
+
+public:
+  InheritedConstructorInfo(Sema &S, SourceLocation UseLoc,
+                           ConstructorUsingShadowDecl *Shadow)
+      : S(S), UseLoc(UseLoc) {
+    bool DiagnosedMultipleConstructedBases = false;
+    CXXRecordDecl *ConstructedBase = nullptr;
+    UsingDecl *ConstructedBaseUsing = nullptr;
+
+    // Find the set of such base class subobjects and check that there's a
+    // unique constructed subobject.
+    for (auto *D : Shadow->redecls()) {
+      auto *DShadow = cast<ConstructorUsingShadowDecl>(D);
+      auto *DNominatedBase = DShadow->getNominatedBaseClass();
+      auto *DConstructedBase = DShadow->getConstructedBaseClass();
+
+      InheritedFromBases.insert(
+          std::make_pair(DNominatedBase->getCanonicalDecl(),
+                         DShadow->getNominatedBaseClassShadowDecl()));
+      if (DShadow->constructsVirtualBase())
+        InheritedFromBases.insert(
+            std::make_pair(DConstructedBase->getCanonicalDecl(),
+                           DShadow->getConstructedBaseClassShadowDecl()));
+      else
+        assert(DNominatedBase == DConstructedBase);
+
+      // [class.inhctor.init]p2:
+      //   If the constructor was inherited from multiple base class subobjects
+      //   of type B, the program is ill-formed.
+      if (!ConstructedBase) {
+        ConstructedBase = DConstructedBase;
+        ConstructedBaseUsing = D->getUsingDecl();
+      } else if (ConstructedBase != DConstructedBase &&
+                 !Shadow->isInvalidDecl()) {
+        if (!DiagnosedMultipleConstructedBases) {
+          S.Diag(UseLoc, diag::err_ambiguous_inherited_constructor)
+              << Shadow->getTargetDecl();
+          S.Diag(ConstructedBaseUsing->getLocation(),
+               diag::note_ambiguous_inherited_constructor_using)
+              << ConstructedBase;
+          DiagnosedMultipleConstructedBases = true;
+        }
+        S.Diag(D->getUsingDecl()->getLocation(),
+               diag::note_ambiguous_inherited_constructor_using)
+            << DConstructedBase;
+      }
+    }
+
+    if (DiagnosedMultipleConstructedBases)
+      Shadow->setInvalidDecl();
+  }
+
+  /// Find the constructor to use for inherited construction of a base class,
+  /// and whether that base class constructor inherits the constructor from a
+  /// virtual base class (in which case it won't actually invoke it).
+  std::pair<CXXConstructorDecl *, bool>
+  findConstructorForBase(CXXRecordDecl *Base, CXXConstructorDecl *Ctor) const {
+    auto It = InheritedFromBases.find(Base->getCanonicalDecl());
+    if (It == InheritedFromBases.end())
+      return std::make_pair(nullptr, false);
+
+    // This is an intermediary class.
+    if (It->second)
+      return std::make_pair(
+          S.findInheritingConstructor(UseLoc, Ctor, It->second),
+          It->second->constructsVirtualBase());
+
+    // This is the base class from which the constructor was inherited.
+    return std::make_pair(Ctor, false);
+  }
+};
+
 /// Is the special member function which would be selected to perform the
 /// specified operation on the specified class type a constexpr constructor?
-static bool specialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
-                                     Sema::CXXSpecialMember CSM,
-                                     unsigned Quals, bool ConstRHS) {
+static bool
+specialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
+                         Sema::CXXSpecialMember CSM, unsigned Quals,
+                         bool ConstRHS,
+                         CXXConstructorDecl *InheritedCtor = nullptr,
+                         Sema::InheritedConstructorInfo *Inherited = nullptr) {
+  // If we're inheriting a constructor, see if we need to call it for this base
+  // class.
+  if (InheritedCtor) {
+    assert(CSM == Sema::CXXDefaultConstructor);
+    auto BaseCtor =
+        Inherited->findConstructorForBase(ClassDecl, InheritedCtor).first;
+    if (BaseCtor)
+      return BaseCtor->isConstexpr();
+  }
+
+  if (CSM == Sema::CXXDefaultConstructor)
+    return ClassDecl->hasConstexprDefaultConstructor();
+
   Sema::SpecialMemberOverloadResult *SMOR =
       lookupCallFromSpecialMember(S, ClassDecl, CSM, Quals, ConstRHS);
   if (!SMOR || !SMOR->getMethod())
@@ -4699,9 +5187,10 @@ static bool specialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
 
 /// Determine whether the specified special member function would be constexpr
 /// if it were implicitly defined.
-static bool defaultedSpecialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
-                                              Sema::CXXSpecialMember CSM,
-                                              bool ConstArg) {
+static bool defaultedSpecialMemberIsConstexpr(
+    Sema &S, CXXRecordDecl *ClassDecl, Sema::CXXSpecialMember CSM,
+    bool ConstArg, CXXConstructorDecl *InheritedCtor = nullptr,
+    Sema::InheritedConstructorInfo *Inherited = nullptr) {
   if (!S.getLangOpts().CPlusPlus11)
     return false;
 
@@ -4710,6 +5199,8 @@ static bool defaultedSpecialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
   bool Ctor = true;
   switch (CSM) {
   case Sema::CXXDefaultConstructor:
+    if (Inherited)
+      break;
     // Since default constructor lookup is essentially trivial (and cannot
     // involve, for instance, template instantiation), we compute whether a
     // defaulted default constructor is constexpr directly within CXXRecordDecl.
@@ -4725,7 +5216,7 @@ static bool defaultedSpecialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
 
   case Sema::CXXCopyAssignment:
   case Sema::CXXMoveAssignment:
-    if (!S.getLangOpts().CPlusPlus1y)
+    if (!S.getLangOpts().CPlusPlus14)
       return false;
     // In C++1y, we need to perform overload resolution.
     Ctor = false;
@@ -4744,7 +5235,10 @@ static bool defaultedSpecialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
   // will be initialized (if the constructor isn't deleted), we just don't know
   // which one.
   if (Ctor && ClassDecl->isUnion())
-    return true;
+    return CSM == Sema::CXXDefaultConstructor
+               ? ClassDecl->hasInClassInitializer() ||
+                     !ClassDecl->hasVariantMembers()
+               : true;
 
   //   -- the class shall not have any virtual base classes;
   if (Ctor && ClassDecl->getNumVBases())
@@ -4764,7 +5258,8 @@ static bool defaultedSpecialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
     if (!BaseType) continue;
 
     CXXRecordDecl *BaseClassDecl = cast<CXXRecordDecl>(BaseType->getDecl());
-    if (!specialMemberIsConstexpr(S, BaseClassDecl, CSM, 0, ConstArg))
+    if (!specialMemberIsConstexpr(S, BaseClassDecl, CSM, 0, ConstArg,
+                                  InheritedCtor, Inherited))
       return false;
   }
 
@@ -4778,6 +5273,8 @@ static bool defaultedSpecialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
   for (const auto *F : ClassDecl->fields()) {
     if (F->isInvalidDecl())
       continue;
+    if (CSM == Sema::CXXDefaultConstructor && F->hasInClassInitializer())
+      continue;
     QualType BaseType = S.Context.getBaseElementType(F->getType());
     if (const RecordType *RecordTy = BaseType->getAs<RecordType>()) {
       CXXRecordDecl *FieldRecDecl = cast<CXXRecordDecl>(RecordTy->getDecl());
@@ -4785,6 +5282,8 @@ static bool defaultedSpecialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
                                     BaseType.getCVRQualifiers(),
                                     ConstArg && !F->isMutable()))
         return false;
+    } else if (CSM == Sema::CXXDefaultConstructor) {
+      return false;
     }
   }
 
@@ -4812,7 +5311,8 @@ computeImplicitExceptionSpec(Sema &S, SourceLocation Loc, CXXMethodDecl *MD) {
   }
   assert(cast<CXXConstructorDecl>(MD)->getInheritedConstructor() &&
          "only special members have implicit exception specs");
-  return S.ComputeInheritingCtorExceptionSpec(cast<CXXConstructorDecl>(MD));
+  return S.ComputeInheritingCtorExceptionSpec(Loc,
+                                              cast<CXXConstructorDecl>(MD));
 }
 
 static FunctionProtoType::ExtProtoInfo getImplicitMethodEPI(Sema &S,
@@ -4909,7 +5409,7 @@ void Sema::CheckExplicitlyDefaultedSpecialMember(CXXMethodDecl *MD) {
     // A defaulted special member cannot have cv-qualifiers.
     if (Type->getTypeQuals()) {
       Diag(MD->getLocation(), diag::err_defaulted_special_member_quals)
-        << (CSM == CXXMoveAssignment) << getLangOpts().CPlusPlus1y;
+        << (CSM == CXXMoveAssignment) << getLangOpts().CPlusPlus14;
       HadError = true;
     }
   }
@@ -4958,7 +5458,7 @@ void Sema::CheckExplicitlyDefaultedSpecialMember(CXXMethodDecl *MD) {
   // destructors in C++1y), this is checked elsewhere.
   bool Constexpr = defaultedSpecialMemberIsConstexpr(*this, RD, CSM,
                                                      HasConstParam);
-  if ((getLangOpts().CPlusPlus1y ? !isa<CXXDestructorDecl>(MD)
+  if ((getLangOpts().CPlusPlus14 ? !isa<CXXDestructorDecl>(MD)
                                  : isa<CXXConstructorDecl>(MD)) &&
       MD->isConstexpr() && !Constexpr &&
       MD->getTemplatedKind() == FunctionDecl::TK_NonTemplate) {
@@ -4996,7 +5496,7 @@ void Sema::CheckExplicitlyDefaultedSpecialMember(CXXMethodDecl *MD) {
     EPI.ExceptionSpec.Type = EST_Unevaluated;
     EPI.ExceptionSpec.SourceDecl = MD;
     MD->setType(Context.getFunctionType(ReturnType,
-                                        ArrayRef<QualType>(&ArgType,
+                                        llvm::makeArrayRef(&ArgType,
                                                            ExpectedParams),
                                         EPI));
   }
@@ -5009,7 +5509,7 @@ void Sema::CheckExplicitlyDefaultedSpecialMember(CXXMethodDecl *MD) {
       //   [For a] user-provided explicitly-defaulted function [...] if such a
       //   function is implicitly defined as deleted, the program is ill-formed.
       Diag(MD->getLocation(), diag::err_out_of_line_default_deletes) << CSM;
-      ShouldDeleteSpecialMember(MD, CSM, /*Diagnose*/true);
+      ShouldDeleteSpecialMember(MD, CSM, nullptr, /*Diagnose*/true);
       HadError = true;
     }
   }
@@ -5024,6 +5524,12 @@ void Sema::CheckExplicitlyDefaultedSpecialMember(CXXMethodDecl *MD) {
 /// C++11 [dcl.fct.def.default]p2.
 void Sema::CheckExplicitlyDefaultedMemberExceptionSpec(
     CXXMethodDecl *MD, const FunctionProtoType *SpecifiedType) {
+  // If the exception specification was explicitly specified but hadn't been
+  // parsed when the method was defaulted, grab it now.
+  if (SpecifiedType->getExceptionSpecType() == EST_Unparsed)
+    SpecifiedType =
+        MD->getTypeSourceInfo()->getType()->castAs<FunctionProtoType>();
+
   // Compute the implicit exception specification.
   CallingConv CC = Context.getDefaultCallingConvention(/*IsVariadic=*/false,
                                                        /*IsCXXMethod=*/true);
@@ -5042,27 +5548,21 @@ void Sema::CheckExplicitlyDefaultedMemberExceptionSpec(
 }
 
 void Sema::CheckDelayedMemberExceptionSpecs() {
-  SmallVector<std::pair<const CXXDestructorDecl *, const CXXDestructorDecl *>,
-              2> Checks;
-  SmallVector<std::pair<CXXMethodDecl *, const FunctionProtoType *>, 2> Specs;
+  decltype(DelayedExceptionSpecChecks) Checks;
+  decltype(DelayedDefaultedMemberExceptionSpecs) Specs;
 
-  std::swap(Checks, DelayedDestructorExceptionSpecChecks);
+  std::swap(Checks, DelayedExceptionSpecChecks);
   std::swap(Specs, DelayedDefaultedMemberExceptionSpecs);
 
   // Perform any deferred checking of exception specifications for virtual
   // destructors.
-  for (unsigned i = 0, e = Checks.size(); i != e; ++i) {
-    const CXXDestructorDecl *Dtor = Checks[i].first;
-    assert(!Dtor->getParent()->isDependentType() &&
-           "Should not ever add destructors of templates into the list.");
-    CheckOverridingFunctionExceptionSpec(Dtor, Checks[i].second);
-  }
+  for (auto &Check : Checks)
+    CheckOverridingFunctionExceptionSpec(Check.first, Check.second);
 
   // Check that any explicitly-defaulted methods have exception specifications
   // compatible with their implicit exception specifications.
-  for (unsigned I = 0, N = Specs.size(); I != N; ++I)
-    CheckExplicitlyDefaultedMemberExceptionSpec(Specs[I].first,
-                                                Specs[I].second);
+  for (auto &Spec : Specs)
+    CheckExplicitlyDefaultedMemberExceptionSpec(Spec.first, Spec.second);
 }
 
 namespace {
@@ -5070,6 +5570,7 @@ struct SpecialMemberDeletionInfo {
   Sema &S;
   CXXMethodDecl *MD;
   Sema::CXXSpecialMember CSM;
+  Sema::InheritedConstructorInfo *ICI;
   bool Diagnose;
 
   // Properties of the special member, computed for convenience.
@@ -5079,11 +5580,11 @@ struct SpecialMemberDeletionInfo {
   bool AllFieldsAreConst;
 
   SpecialMemberDeletionInfo(Sema &S, CXXMethodDecl *MD,
-                            Sema::CXXSpecialMember CSM, bool Diagnose)
-    : S(S), MD(MD), CSM(CSM), Diagnose(Diagnose),
-      IsConstructor(false), IsAssignment(false), IsMove(false),
-      ConstArg(false), Loc(MD->getLocation()),
-      AllFieldsAreConst(true) {
+                            Sema::CXXSpecialMember CSM,
+                            Sema::InheritedConstructorInfo *ICI, bool Diagnose)
+      : S(S), MD(MD), CSM(CSM), ICI(ICI), Diagnose(Diagnose),
+        IsConstructor(false), IsAssignment(false), IsMove(false),
+        ConstArg(false), Loc(MD->getLocation()), AllFieldsAreConst(true) {
     switch (CSM) {
       case Sema::CXXDefaultConstructor:
       case Sema::CXXCopyConstructor:
@@ -5114,6 +5615,10 @@ struct SpecialMemberDeletionInfo {
   }
 
   bool inUnion() const { return MD->getParent()->isUnion(); }
+
+  Sema::CXXSpecialMember getEffectiveCSM() {
+    return ICI ? Sema::CXXInvalid : CSM;
+  }
 
   /// Look up the corresponding special member in the given class.
   Sema::SpecialMemberOverloadResult *lookupIn(CXXRecordDecl *Class,
@@ -5191,13 +5696,13 @@ bool SpecialMemberDeletionInfo::shouldDeleteForSubobjectCall(
     if (Field) {
       S.Diag(Field->getLocation(),
              diag::note_deleted_special_member_class_subobject)
-        << CSM << MD->getParent() << /*IsField*/true
+        << getEffectiveCSM() << MD->getParent() << /*IsField*/true
         << Field << DiagKind << IsDtorCallInCtor;
     } else {
       CXXBaseSpecifier *Base = Subobj.get<CXXBaseSpecifier*>();
       S.Diag(Base->getLocStart(),
              diag::note_deleted_special_member_class_subobject)
-        << CSM << MD->getParent() << /*IsField*/false
+        << getEffectiveCSM() << MD->getParent() << /*IsField*/false
         << Base->getType() << DiagKind << IsDtorCallInCtor;
     }
 
@@ -5254,6 +5759,30 @@ bool SpecialMemberDeletionInfo::shouldDeleteForClassSubobject(
 /// having a particular direct or virtual base class.
 bool SpecialMemberDeletionInfo::shouldDeleteForBase(CXXBaseSpecifier *Base) {
   CXXRecordDecl *BaseClass = Base->getType()->getAsCXXRecordDecl();
+  // If program is correct, BaseClass cannot be null, but if it is, the error
+  // must be reported elsewhere.
+  if (!BaseClass)
+    return false;
+  // If we have an inheriting constructor, check whether we're calling an
+  // inherited constructor instead of a default constructor.
+  if (ICI) {
+    assert(CSM == Sema::CXXDefaultConstructor);
+    auto *BaseCtor =
+        ICI->findConstructorForBase(BaseClass, cast<CXXConstructorDecl>(MD)
+                                                   ->getInheritedConstructor()
+                                                   .getConstructor())
+            .first;
+    if (BaseCtor) {
+      if (BaseCtor->isDeleted() && Diagnose) {
+        S.Diag(Base->getLocStart(),
+               diag::note_deleted_special_member_class_subobject)
+          << getEffectiveCSM() << MD->getParent() << /*IsField*/false
+          << Base->getType() << /*Deleted*/1 << /*IsDtorCallInCtor*/false;
+        S.NoteDeletedFunction(BaseCtor);
+      }
+      return BaseCtor->isDeleted();
+    }
+  }
   return shouldDeleteForClassSubobject(BaseClass, Base, 0);
 }
 
@@ -5269,7 +5798,7 @@ bool SpecialMemberDeletionInfo::shouldDeleteForField(FieldDecl *FD) {
     if (FieldType->isReferenceType() && !FD->hasInClassInitializer()) {
       if (Diagnose)
         S.Diag(FD->getLocation(), diag::note_deleted_default_ctor_uninit_field)
-          << MD->getParent() << FD << FieldType << /*Reference*/0;
+          << !!ICI << MD->getParent() << FD << FieldType << /*Reference*/0;
       return true;
     }
     // C++11 [class.ctor]p5: any non-variant non-static data member of
@@ -5281,7 +5810,7 @@ bool SpecialMemberDeletionInfo::shouldDeleteForField(FieldDecl *FD) {
         (!FieldRecord || !FieldRecord->hasUserProvidedDefaultConstructor())) {
       if (Diagnose)
         S.Diag(FD->getLocation(), diag::note_deleted_default_ctor_uninit_field)
-          << MD->getParent() << FD << FD->getType() << /*Const*/1;
+          << !!ICI << MD->getParent() << FD << FD->getType() << /*Const*/1;
       return true;
     }
 
@@ -5340,7 +5869,7 @@ bool SpecialMemberDeletionInfo::shouldDeleteForField(FieldDecl *FD) {
         if (Diagnose)
           S.Diag(FieldRecord->getLocation(),
                  diag::note_deleted_default_ctor_all_const)
-            << MD->getParent() << /*anonymous union*/1;
+            << !!ICI << MD->getParent() << /*anonymous union*/1;
         return true;
       }
 
@@ -5368,7 +5897,7 @@ bool SpecialMemberDeletionInfo::shouldDeleteForAllConstMembers() {
     if (Diagnose)
       S.Diag(MD->getParent()->getLocation(),
              diag::note_deleted_default_ctor_all_const)
-        << MD->getParent() << /*not anonymous union*/0;
+        << !!ICI << MD->getParent() << /*not anonymous union*/0;
     return true;
   }
   return false;
@@ -5378,6 +5907,7 @@ bool SpecialMemberDeletionInfo::shouldDeleteForAllConstMembers() {
 /// deleted, as specified in C++11 [class.ctor]p5, C++11 [class.copy]p11,
 /// C++11 [class.copy]p23, and C++11 [class.dtor]p5.
 bool Sema::ShouldDeleteSpecialMember(CXXMethodDecl *MD, CXXSpecialMember CSM,
+                                     InheritedConstructorInfo *ICI,
                                      bool Diagnose) {
   if (MD->isInvalidDecl())
     return false;
@@ -5467,7 +5997,7 @@ bool Sema::ShouldDeleteSpecialMember(CXXMethodDecl *MD, CXXSpecialMember CSM,
     }
   }
 
-  SpecialMemberDeletionInfo SMI(*this, MD, CSM, Diagnose);
+  SpecialMemberDeletionInfo SMI(*this, MD, CSM, ICI, Diagnose);
 
   for (auto &BI : RD->bases())
     if (!BI.isVirtual() &&
@@ -5489,6 +6019,13 @@ bool Sema::ShouldDeleteSpecialMember(CXXMethodDecl *MD, CXXSpecialMember CSM,
 
   if (SMI.shouldDeleteForAllConstMembers())
     return true;
+
+  if (getLangOpts().CUDA) {
+    // We should delete the special member in CUDA mode if target inference
+    // failed.
+    return inferCUDATargetForImplicitSpecialMember(RD, CSM, MD, SMI.ConstArg,
+                                                   Diagnose);
+  }
 
   return false;
 }
@@ -5894,81 +6431,79 @@ bool Sema::SpecialMemberIsTrivial(CXXMethodDecl *MD, CXXSpecialMember CSM,
   return true;
 }
 
-/// \brief Data used with FindHiddenVirtualMethod
 namespace {
-  struct FindHiddenVirtualMethodData {
-    Sema *S;
-    CXXMethodDecl *Method;
-    llvm::SmallPtrSet<const CXXMethodDecl *, 8> OverridenAndUsingBaseMethods;
-    SmallVector<CXXMethodDecl *, 8> OverloadedMethods;
-  };
-}
+struct FindHiddenVirtualMethod {
+  Sema *S;
+  CXXMethodDecl *Method;
+  llvm::SmallPtrSet<const CXXMethodDecl *, 8> OverridenAndUsingBaseMethods;
+  SmallVector<CXXMethodDecl *, 8> OverloadedMethods;
 
-/// \brief Check whether any most overriden method from MD in Methods
-static bool CheckMostOverridenMethods(const CXXMethodDecl *MD,
-                   const llvm::SmallPtrSet<const CXXMethodDecl *, 8>& Methods) {
-  if (MD->size_overridden_methods() == 0)
-    return Methods.count(MD->getCanonicalDecl());
-  for (CXXMethodDecl::method_iterator I = MD->begin_overridden_methods(),
-                                      E = MD->end_overridden_methods();
-       I != E; ++I)
-    if (CheckMostOverridenMethods(*I, Methods))
-      return true;
-  return false;
-}
-
-/// \brief Member lookup function that determines whether a given C++
-/// method overloads virtual methods in a base class without overriding any,
-/// to be used with CXXRecordDecl::lookupInBases().
-static bool FindHiddenVirtualMethod(const CXXBaseSpecifier *Specifier,
-                                    CXXBasePath &Path,
-                                    void *UserData) {
-  RecordDecl *BaseRecord = Specifier->getType()->getAs<RecordType>()->getDecl();
-
-  FindHiddenVirtualMethodData &Data
-    = *static_cast<FindHiddenVirtualMethodData*>(UserData);
-
-  DeclarationName Name = Data.Method->getDeclName();
-  assert(Name.getNameKind() == DeclarationName::Identifier);
-
-  bool foundSameNameMethod = false;
-  SmallVector<CXXMethodDecl *, 8> overloadedMethods;
-  for (Path.Decls = BaseRecord->lookup(Name);
-       !Path.Decls.empty();
-       Path.Decls = Path.Decls.slice(1)) {
-    NamedDecl *D = Path.Decls.front();
-    if (CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(D)) {
-      MD = MD->getCanonicalDecl();
-      foundSameNameMethod = true;
-      // Interested only in hidden virtual methods.
-      if (!MD->isVirtual())
-        continue;
-      // If the method we are checking overrides a method from its base
-      // don't warn about the other overloaded methods. Clang deviates from GCC
-      // by only diagnosing overloads of inherited virtual functions that do not
-      // override any other virtual functions in the base. GCC's
-      // -Woverloaded-virtual diagnoses any derived function hiding a virtual
-      // function from a base class. These cases may be better served by a
-      // warning (not specific to virtual functions) on call sites when the call
-      // would select a different function from the base class, were it visible.
-      // See FIXME in test/SemaCXX/warn-overload-virtual.cpp for an example.
-      if (!Data.S->IsOverload(Data.Method, MD, false))
+private:
+  /// Check whether any most overriden method from MD in Methods
+  static bool CheckMostOverridenMethods(
+      const CXXMethodDecl *MD,
+      const llvm::SmallPtrSetImpl<const CXXMethodDecl *> &Methods) {
+    if (MD->size_overridden_methods() == 0)
+      return Methods.count(MD->getCanonicalDecl());
+    for (CXXMethodDecl::method_iterator I = MD->begin_overridden_methods(),
+                                        E = MD->end_overridden_methods();
+         I != E; ++I)
+      if (CheckMostOverridenMethods(*I, Methods))
         return true;
-      // Collect the overload only if its hidden.
-      if (!CheckMostOverridenMethods(MD, Data.OverridenAndUsingBaseMethods))
-        overloadedMethods.push_back(MD);
-    }
+    return false;
   }
 
-  if (foundSameNameMethod)
-    Data.OverloadedMethods.append(overloadedMethods.begin(),
-                                   overloadedMethods.end());
-  return foundSameNameMethod;
-}
+public:
+  /// Member lookup function that determines whether a given C++
+  /// method overloads virtual methods in a base class without overriding any,
+  /// to be used with CXXRecordDecl::lookupInBases().
+  bool operator()(const CXXBaseSpecifier *Specifier, CXXBasePath &Path) {
+    RecordDecl *BaseRecord =
+        Specifier->getType()->getAs<RecordType>()->getDecl();
+
+    DeclarationName Name = Method->getDeclName();
+    assert(Name.getNameKind() == DeclarationName::Identifier);
+
+    bool foundSameNameMethod = false;
+    SmallVector<CXXMethodDecl *, 8> overloadedMethods;
+    for (Path.Decls = BaseRecord->lookup(Name); !Path.Decls.empty();
+         Path.Decls = Path.Decls.slice(1)) {
+      NamedDecl *D = Path.Decls.front();
+      if (CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(D)) {
+        MD = MD->getCanonicalDecl();
+        foundSameNameMethod = true;
+        // Interested only in hidden virtual methods.
+        if (!MD->isVirtual())
+          continue;
+        // If the method we are checking overrides a method from its base
+        // don't warn about the other overloaded methods. Clang deviates from
+        // GCC by only diagnosing overloads of inherited virtual functions that
+        // do not override any other virtual functions in the base. GCC's
+        // -Woverloaded-virtual diagnoses any derived function hiding a virtual
+        // function from a base class. These cases may be better served by a
+        // warning (not specific to virtual functions) on call sites when the
+        // call would select a different function from the base class, were it
+        // visible.
+        // See FIXME in test/SemaCXX/warn-overload-virtual.cpp for an example.
+        if (!S->IsOverload(Method, MD, false))
+          return true;
+        // Collect the overload only if its hidden.
+        if (!CheckMostOverridenMethods(MD, OverridenAndUsingBaseMethods))
+          overloadedMethods.push_back(MD);
+      }
+    }
+
+    if (foundSameNameMethod)
+      OverloadedMethods.append(overloadedMethods.begin(),
+                               overloadedMethods.end());
+    return foundSameNameMethod;
+  }
+};
+} // end anonymous namespace
 
 /// \brief Add the most overriden methods from MD to Methods
 static void AddMostOverridenMethods(const CXXMethodDecl *MD,
-                         llvm::SmallPtrSet<const CXXMethodDecl *, 8>& Methods) {
+                        llvm::SmallPtrSetImpl<const CXXMethodDecl *>& Methods) {
   if (MD->size_overridden_methods() == 0)
     Methods.insert(MD->getCanonicalDecl());
   for (CXXMethodDecl::method_iterator I = MD->begin_overridden_methods(),
@@ -5987,9 +6522,9 @@ void Sema::FindHiddenVirtualMethods(CXXMethodDecl *MD,
   CXXBasePaths Paths(/*FindAmbiguities=*/true, // true to look in all bases.
                      /*bool RecordPaths=*/false,
                      /*bool DetectVirtual=*/false);
-  FindHiddenVirtualMethodData Data;
-  Data.Method = MD;
-  Data.S = this;
+  FindHiddenVirtualMethod FHVM;
+  FHVM.Method = MD;
+  FHVM.S = this;
 
   // Keep the base methods that were overriden or introduced in the subclass
   // by 'using' in a set. A base method not in this set is hidden.
@@ -6000,11 +6535,11 @@ void Sema::FindHiddenVirtualMethods(CXXMethodDecl *MD,
     if (UsingShadowDecl *shad = dyn_cast<UsingShadowDecl>(*I))
       ND = shad->getTargetDecl();
     if (CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(ND))
-      AddMostOverridenMethods(MD, Data.OverridenAndUsingBaseMethods);
+      AddMostOverridenMethods(MD, FHVM.OverridenAndUsingBaseMethods);
   }
 
-  if (DC->lookupInBases(&FindHiddenVirtualMethod, &Data, Paths))
-    OverloadedMethods = Data.OverloadedMethods;
+  if (DC->lookupInBases(FHVM, Paths))
+    OverloadedMethods = FHVM.OverloadedMethods;
 }
 
 void Sema::NoteHiddenVirtualMethods(CXXMethodDecl *MD,
@@ -6070,27 +6605,33 @@ void Sema::ActOnFinishCXXMemberSpecification(Scope* S, SourceLocation RLoc,
 /// [special]p1).  This routine can only be executed just before the
 /// definition of the class is complete.
 void Sema::AddImplicitlyDeclaredMembersToClass(CXXRecordDecl *ClassDecl) {
-  if (!ClassDecl->hasUserDeclaredConstructor())
+  if (ClassDecl->needsImplicitDefaultConstructor()) {
     ++ASTContext::NumImplicitDefaultConstructors;
 
-  if (!ClassDecl->hasUserDeclaredCopyConstructor()) {
+    if (ClassDecl->hasInheritedConstructor())
+      DeclareImplicitDefaultConstructor(ClassDecl);
+  }
+
+  if (ClassDecl->needsImplicitCopyConstructor()) {
     ++ASTContext::NumImplicitCopyConstructors;
 
     // If the properties or semantics of the copy constructor couldn't be
     // determined while the class was being declared, force a declaration
     // of it now.
-    if (ClassDecl->needsOverloadResolutionForCopyConstructor())
+    if (ClassDecl->needsOverloadResolutionForCopyConstructor() ||
+        ClassDecl->hasInheritedConstructor())
       DeclareImplicitCopyConstructor(ClassDecl);
   }
 
   if (getLangOpts().CPlusPlus11 && ClassDecl->needsImplicitMoveConstructor()) {
     ++ASTContext::NumImplicitMoveConstructors;
 
-    if (ClassDecl->needsOverloadResolutionForMoveConstructor())
+    if (ClassDecl->needsOverloadResolutionForMoveConstructor() ||
+        ClassDecl->hasInheritedConstructor())
       DeclareImplicitMoveConstructor(ClassDecl);
   }
 
-  if (!ClassDecl->hasUserDeclaredCopyAssignment()) {
+  if (ClassDecl->needsImplicitCopyAssignment()) {
     ++ASTContext::NumImplicitCopyAssignmentOperators;
 
     // If we have a dynamic class, then the copy assignment operator may be
@@ -6098,7 +6639,8 @@ void Sema::AddImplicitlyDeclaredMembersToClass(CXXRecordDecl *ClassDecl) {
     // it shows up in the right place in the vtable and that we diagnose
     // problems with the implicit exception specification.
     if (ClassDecl->isDynamicClass() ||
-        ClassDecl->needsOverloadResolutionForCopyAssignment())
+        ClassDecl->needsOverloadResolutionForCopyAssignment() ||
+        ClassDecl->hasInheritedAssignment())
       DeclareImplicitCopyAssignment(ClassDecl);
   }
 
@@ -6107,11 +6649,12 @@ void Sema::AddImplicitlyDeclaredMembersToClass(CXXRecordDecl *ClassDecl) {
 
     // Likewise for the move assignment operator.
     if (ClassDecl->isDynamicClass() ||
-        ClassDecl->needsOverloadResolutionForMoveAssignment())
+        ClassDecl->needsOverloadResolutionForMoveAssignment() ||
+        ClassDecl->hasInheritedAssignment())
       DeclareImplicitMoveAssignment(ClassDecl);
   }
 
-  if (!ClassDecl->hasUserDeclaredDestructor()) {
+  if (ClassDecl->needsImplicitDestructor()) {
     ++ASTContext::NumImplicitDestructors;
 
     // If we have a dynamic class, then the destructor may be virtual, so we
@@ -6521,6 +7064,22 @@ QualType Sema::CheckDestructorDeclarator(Declarator &D, QualType R,
   return Context.getFunctionType(Context.VoidTy, None, EPI);
 }
 
+static void extendLeft(SourceRange &R, SourceRange Before) {
+  if (Before.isInvalid())
+    return;
+  R.setBegin(Before.getBegin());
+  if (R.getEnd().isInvalid())
+    R.setEnd(Before.getEnd());
+}
+
+static void extendRight(SourceRange &R, SourceRange After) {
+  if (After.isInvalid())
+    return;
+  if (R.getBegin().isInvalid())
+    R.setBegin(After.getBegin());
+  R.setEnd(After.getEnd());
+}
+
 /// CheckConversionDeclarator - Called by ActOnDeclarator to check the
 /// well-formednes of the conversion function declarator @p D with
 /// type @p R. If there are any errors in the declarator, this routine
@@ -6542,7 +7101,9 @@ void Sema::CheckConversionDeclarator(Declarator &D, QualType &R,
     SC = SC_None;
   }
 
-  QualType ConvType = GetTypeFromParser(D.getName().ConversionFunctionId);
+  TypeSourceInfo *ConvTSI = nullptr;
+  QualType ConvType =
+      GetTypeFromParser(D.getName().ConversionFunctionId, &ConvTSI);
 
   if (D.getDeclSpec().hasTypeSpecifier() && !D.isInvalidType()) {
     // Conversion functions don't have return types, but the parser will
@@ -6576,9 +7137,76 @@ void Sema::CheckConversionDeclarator(Declarator &D, QualType &R,
   // Diagnose "&operator bool()" and other such nonsense.  This
   // is actually a gcc extension which we don't support.
   if (Proto->getReturnType() != ConvType) {
-    Diag(D.getIdentifierLoc(), diag::err_conv_function_with_complex_decl)
-        << Proto->getReturnType();
-    D.setInvalidType();
+    bool NeedsTypedef = false;
+    SourceRange Before, After;
+
+    // Walk the chunks and extract information on them for our diagnostic.
+    bool PastFunctionChunk = false;
+    for (auto &Chunk : D.type_objects()) {
+      switch (Chunk.Kind) {
+      case DeclaratorChunk::Function:
+        if (!PastFunctionChunk) {
+          if (Chunk.Fun.HasTrailingReturnType) {
+            TypeSourceInfo *TRT = nullptr;
+            GetTypeFromParser(Chunk.Fun.getTrailingReturnType(), &TRT);
+            if (TRT) extendRight(After, TRT->getTypeLoc().getSourceRange());
+          }
+          PastFunctionChunk = true;
+          break;
+        }
+        // Fall through.
+      case DeclaratorChunk::Array:
+        NeedsTypedef = true;
+        extendRight(After, Chunk.getSourceRange());
+        break;
+
+      case DeclaratorChunk::Pointer:
+      case DeclaratorChunk::BlockPointer:
+      case DeclaratorChunk::Reference:
+      case DeclaratorChunk::MemberPointer:
+      case DeclaratorChunk::Pipe:
+        extendLeft(Before, Chunk.getSourceRange());
+        break;
+
+      case DeclaratorChunk::Paren:
+        extendLeft(Before, Chunk.Loc);
+        extendRight(After, Chunk.EndLoc);
+        break;
+      }
+    }
+
+    SourceLocation Loc = Before.isValid() ? Before.getBegin() :
+                         After.isValid()  ? After.getBegin() :
+                                            D.getIdentifierLoc();
+    auto &&DB = Diag(Loc, diag::err_conv_function_with_complex_decl);
+    DB << Before << After;
+
+    if (!NeedsTypedef) {
+      DB << /*don't need a typedef*/0;
+
+      // If we can provide a correct fix-it hint, do so.
+      if (After.isInvalid() && ConvTSI) {
+        SourceLocation InsertLoc =
+            getLocForEndOfToken(ConvTSI->getTypeLoc().getLocEnd());
+        DB << FixItHint::CreateInsertion(InsertLoc, " ")
+           << FixItHint::CreateInsertionFromRange(
+                  InsertLoc, CharSourceRange::getTokenRange(Before))
+           << FixItHint::CreateRemoval(Before);
+      }
+    } else if (!Proto->getReturnType()->isDependentType()) {
+      DB << /*typedef*/1 << Proto->getReturnType();
+    } else if (getLangOpts().CPlusPlus11) {
+      DB << /*alias template*/2 << Proto->getReturnType();
+    } else {
+      DB << /*might not be fixable*/3;
+    }
+
+    // Recover by incorporating the other type chunks into the result type.
+    // Note, this does *not* change the name of the function. This is compatible
+    // with the GCC extension:
+    //   struct S { &operator int(); } s;
+    //   int &r = s.operator int(); // ok in GCC
+    //   S::operator int&() {} // error in GCC, function name is 'operator int'.
     ConvType = Proto->getReturnType();
   }
 
@@ -6642,7 +7270,7 @@ Decl *Sema::ActOnConversionDeclarator(CXXConversionDecl *Conversion) {
     if (ConvType == ClassType)
       Diag(Conversion->getLocation(), diag::warn_conv_to_self_not_used)
         << ClassType;
-    else if (IsDerivedFrom(ClassType, ConvType))
+    else if (IsDerivedFrom(Conversion->getLocation(), ClassType, ConvType))
       Diag(Conversion->getLocation(), diag::warn_conv_to_base_not_used)
         <<  ClassType << ConvType;
   } else if (ConvType->isVoidType()) {
@@ -6709,7 +7337,8 @@ Decl *Sema::ActOnStartNamespaceDef(Scope *NamespcScope,
                                    SourceLocation IdentLoc,
                                    IdentifierInfo *II,
                                    SourceLocation LBrace,
-                                   AttributeList *AttrList) {
+                                   AttributeList *AttrList,
+                                   UsingDirectiveDecl *&UD) {
   SourceLocation StartLoc = InlineLoc.isValid() ? InlineLoc : NamespaceLoc;
   // For anonymous namespace, take the location of the left brace.
   SourceLocation Loc = II ? IdentLoc : LBrace;
@@ -6730,23 +7359,14 @@ Decl *Sema::ActOnStartNamespaceDef(Scope *NamespcScope,
     //   treated as an original-namespace-name.
     //
     // Since namespace names are unique in their scope, and we don't
-    // look through using directives, just look for any ordinary names.
-    
-    const unsigned IDNS = Decl::IDNS_Ordinary | Decl::IDNS_Member | 
-    Decl::IDNS_Type | Decl::IDNS_Using | Decl::IDNS_Tag | 
-    Decl::IDNS_Namespace;
-    NamedDecl *PrevDecl = nullptr;
-    DeclContext::lookup_result R = CurContext->getRedeclContext()->lookup(II);
-    for (DeclContext::lookup_iterator I = R.begin(), E = R.end(); I != E;
-         ++I) {
-      if ((*I)->getIdentifierNamespace() & IDNS) {
-        PrevDecl = *I;
-        break;
-      }
-    }
-    
+    // look through using directives, just look for any ordinary names
+    // as if by qualified name lookup.
+    LookupResult R(*this, II, IdentLoc, LookupOrdinaryName, ForRedeclaration);
+    LookupQualifiedName(R, CurContext->getRedeclContext());
+    NamedDecl *PrevDecl =
+        R.isSingleResult() ? R.getRepresentativeDecl() : nullptr;
     PrevNS = dyn_cast_or_null<NamespaceDecl>(PrevDecl);
-    
+
     if (PrevNS) {
       // This is an extended namespace definition.
       if (IsInline != PrevNS->isInline())
@@ -6833,14 +7453,13 @@ Decl *Sema::ActOnStartNamespaceDef(Scope *NamespcScope,
     // namespace internal linkage.
 
     if (!PrevNS) {
-      UsingDirectiveDecl* UD
-        = UsingDirectiveDecl::Create(Context, Parent,
-                                     /* 'using' */ LBrace,
-                                     /* 'namespace' */ SourceLocation(),
-                                     /* qualifier */ NestedNameSpecifierLoc(),
-                                     /* identifier */ SourceLocation(),
-                                     Namespc,
-                                     /* Ancestor */ Parent);
+      UD = UsingDirectiveDecl::Create(Context, Parent,
+                                      /* 'using' */ LBrace,
+                                      /* 'namespace' */ SourceLocation(),
+                                      /* qualifier */ NestedNameSpecifierLoc(),
+                                      /* identifier */ SourceLocation(),
+                                      Namespc,
+                                      /* Ancestor */ Parent);
       UD->setImplicit();
       Parent->addDecl(UD);
     }
@@ -6899,7 +7518,7 @@ NamespaceDecl *Sema::getOrCreateStdNamespace() {
                                          /*PrevDecl=*/nullptr);
     getStdNamespace()->setImplicit(true);
   }
-  
+
   return getStdNamespace();
 }
 
@@ -6954,7 +7573,7 @@ bool Sema::isStdInitializerList(QualType Ty, QualType *Element) {
     StdInitializerList = Template;
   }
 
-  if (Template != StdInitializerList)
+  if (Template->getCanonicalDecl() != StdInitializerList->getCanonicalDecl())
     return false;
 
   // This is an instance of std::initializer_list. Find the argument type.
@@ -7060,12 +7679,11 @@ static bool TryNamespaceTypoCorrection(Sema &S, LookupResult &R, Scope *Sc,
                                        CXXScopeSpec &SS,
                                        SourceLocation IdentLoc,
                                        IdentifierInfo *Ident) {
-  NamespaceValidatorCCC Validator;
   R.clear();
-  if (TypoCorrection Corrected = S.CorrectTypo(R.getLookupNameInfo(),
-                                               R.getLookupKind(), Sc, &SS,
-                                               Validator,
-                                               Sema::CTK_ErrorRecovery)) {
+  if (TypoCorrection Corrected =
+          S.CorrectTypo(R.getLookupNameInfo(), R.getLookupKind(), Sc, &SS,
+                        llvm::make_unique<NamespaceValidatorCCC>(),
+                        Sema::CTK_ErrorRecovery)) {
     if (DeclContext *DC = S.computeDeclContext(SS, false)) {
       std::string CorrectedStr(Corrected.getAsString(S.getLangOpts()));
       bool DroppedSpecifier = Corrected.WillReplaceSpecifier() &&
@@ -7079,7 +7697,7 @@ static bool TryNamespaceTypoCorrection(Sema &S, LookupResult &R, Scope *Sc,
                      S.PDiag(diag::err_using_directive_suggest) << Ident,
                      S.PDiag(diag::note_namespace_defined_here));
     }
-    R.addDecl(Corrected.getCorrectionDecl());
+    R.addDecl(Corrected.getFoundDecl());
     return true;
   }
   return false;
@@ -7097,7 +7715,7 @@ Decl *Sema::ActOnUsingDirective(Scope *S,
   assert(IdentLoc.isValid() && "Invalid NamespceName location.");
 
   // This can only happen along a recovery path.
-  while (S->getFlags() & Scope::TemplateParamScope)
+  while (S->isTemplateParamScope())
     S = S->getParent();
   assert(S->getFlags() & Scope::DeclScope && "Invalid Scope.");
 
@@ -7127,9 +7745,13 @@ Decl *Sema::ActOnUsingDirective(Scope *S,
   }
   
   if (!R.empty()) {
-    NamedDecl *Named = R.getFoundDecl();
-    assert((isa<NamespaceDecl>(Named) || isa<NamespaceAliasDecl>(Named))
-        && "expected namespace decl");
+    NamedDecl *Named = R.getRepresentativeDecl();
+    NamespaceDecl *NS = R.getAsSingle<NamespaceDecl>();
+    assert(NS && "expected namespace decl");
+
+    // The use of a nested name specifier may trigger deprecation warnings.
+    DiagnoseUseOfDecl(Named, IdentLoc);
+
     // C++ [namespace.udir]p1:
     //   A using-directive specifies that the names in the nominated
     //   namespace can be used in the scope in which the
@@ -7142,7 +7764,6 @@ Decl *Sema::ActOnUsingDirective(Scope *S,
 
     // Find enclosing context containing both using-directive and
     // nominated namespace.
-    NamespaceDecl *NS = getNamespaceDecl(Named);
     DeclContext *CommonAncestor = cast<DeclContext>(NS);
     while (CommonAncestor && !CommonAncestor->Encloses(CurContext))
       CommonAncestor = CommonAncestor->getParent();
@@ -7278,7 +7899,7 @@ bool Sema::CheckUsingShadowDecl(UsingDecl *Using, NamedDecl *Orig,
   // function will silently decide not to build a shadow decl, which
   // will pre-empt further diagnostics.
   //
-  // We don't need to do this in C++0x because we do the check once on
+  // We don't need to do this in C++11 because we do the check once on
   // the qualifier.
   //
   // FIXME: diagnose the following if we care enough:
@@ -7336,13 +7957,24 @@ bool Sema::CheckUsingShadowDecl(UsingDecl *Using, NamedDecl *Orig,
   for (LookupResult::iterator I = Previous.begin(), E = Previous.end();
          I != E; ++I) {
     NamedDecl *D = (*I)->getUnderlyingDecl();
+    // We can have UsingDecls in our Previous results because we use the same
+    // LookupResult for checking whether the UsingDecl itself is a valid
+    // redeclaration.
+    if (isa<UsingDecl>(D))
+      continue;
+
     if (IsEquivalentForUsingDecl(Context, D, Target)) {
       if (UsingShadowDecl *Shadow = dyn_cast<UsingShadowDecl>(*I))
         PrevShadow = Shadow;
       FoundEquivalentDecl = true;
+    } else if (isEquivalentInternalLinkageDeclaration(D, Target)) {
+      // We don't conflict with an existing using shadow decl of an equivalent
+      // declaration, but we're not a redeclaration of it.
+      FoundEquivalentDecl = true;
     }
 
-    (isa<TagDecl>(D) ? Tag : NonTag) = D;
+    if (isVisible(D))
+      (isa<TagDecl>(D) ? Tag : NonTag) = D;
   }
 
   if (FoundEquivalentDecl)
@@ -7398,12 +8030,21 @@ bool Sema::CheckUsingShadowDecl(UsingDecl *Using, NamedDecl *Orig,
   return true;
 }
 
+/// Determine whether a direct base class is a virtual base class.
+static bool isVirtualDirectBase(CXXRecordDecl *Derived, CXXRecordDecl *Base) {
+  if (!Derived->getNumVBases())
+    return false;
+  for (auto &B : Derived->bases())
+    if (B.getType()->getAsCXXRecordDecl() == Base)
+      return B.isVirtual();
+  llvm_unreachable("not a direct base class");
+}
+
 /// Builds a shadow declaration corresponding to a 'using' declaration.
 UsingShadowDecl *Sema::BuildUsingShadowDecl(Scope *S,
                                             UsingDecl *UD,
                                             NamedDecl *Orig,
                                             UsingShadowDecl *PrevDecl) {
-
   // If we resolved to another shadow declaration, just coalesce them.
   NamedDecl *Target = Orig;
   if (isa<UsingShadowDecl>(Target)) {
@@ -7411,9 +8052,21 @@ UsingShadowDecl *Sema::BuildUsingShadowDecl(Scope *S,
     assert(!isa<UsingShadowDecl>(Target) && "nested shadow declaration");
   }
 
-  UsingShadowDecl *Shadow
-    = UsingShadowDecl::Create(Context, CurContext,
-                              UD->getLocation(), UD, Target);
+  NamedDecl *NonTemplateTarget = Target;
+  if (auto *TargetTD = dyn_cast<TemplateDecl>(Target))
+    NonTemplateTarget = TargetTD->getTemplatedDecl();
+
+  UsingShadowDecl *Shadow;
+  if (isa<CXXConstructorDecl>(NonTemplateTarget)) {
+    bool IsVirtualBase =
+        isVirtualDirectBase(cast<CXXRecordDecl>(CurContext),
+                            UD->getQualifier()->getAsRecordDecl());
+    Shadow = ConstructorUsingShadowDecl::Create(
+        Context, CurContext, UD->getLocation(), UD, Orig, IsVirtualBase);
+  } else {
+    Shadow = UsingShadowDecl::Create(Context, CurContext, UD->getLocation(), UD,
+                                     Target);
+  }
   UD->addShadowDecl(Shadow);
 
   Shadow->setAccess(UD->getAccess());
@@ -7515,6 +8168,9 @@ public:
     if (Candidate.WillReplaceSpecifier() && !Candidate.getCorrectionSpecifier())
       return false;
 
+    // FIXME: Don't correct to a name that CheckUsingDeclRedeclaration would
+    // reject.
+
     if (RequireMemberOf) {
       auto *FoundRecord = dyn_cast<CXXRecordDecl>(ND);
       if (FoundRecord && FoundRecord->isInjectedClassName()) {
@@ -7551,6 +8207,10 @@ public:
 
         // FIXME: Check that the base class member is accessible?
       }
+    } else {
+      auto *FoundRecord = dyn_cast<CXXRecordDecl>(ND);
+      if (FoundRecord && FoundRecord->isInjectedClassName())
+        return false;
     }
 
     if (isa<TypeDecl>(ND))
@@ -7591,8 +8251,17 @@ NamedDecl *Sema::BuildUsingDeclaration(Scope *S, AccessSpecifier AS,
     return nullptr;
   }
 
+  // For an inheriting constructor declaration, the name of the using
+  // declaration is the name of a constructor in this class, not in the
+  // base class.
+  DeclarationNameInfo UsingName = NameInfo;
+  if (UsingName.getName().getNameKind() == DeclarationName::CXXConstructorName)
+    if (auto *RD = dyn_cast<CXXRecordDecl>(CurContext))
+      UsingName.setName(Context.DeclarationNames.getCXXConstructorName(
+          Context.getCanonicalType(Context.getRecordType(RD))));
+
   // Do the redeclaration lookup in the current scope.
-  LookupResult Previous(*this, NameInfo, LookupUsingDeclName,
+  LookupResult Previous(*this, UsingName, LookupUsingDeclName,
                         ForRedeclaration);
   Previous.setHideTags(false);
   if (S) {
@@ -7649,8 +8318,8 @@ NamedDecl *Sema::BuildUsingDeclaration(Scope *S, AccessSpecifier AS,
 
   auto Build = [&](bool Invalid) {
     UsingDecl *UD =
-        UsingDecl::Create(Context, CurContext, UsingLoc, QualifierLoc, NameInfo,
-                          HasTypenameKeyword);
+        UsingDecl::Create(Context, CurContext, UsingLoc, QualifierLoc,
+                          UsingName, HasTypenameKeyword);
     UD->setAccess(AS);
     CurContext->addDecl(UD);
     UD->setInvalidDecl(Invalid);
@@ -7662,15 +8331,7 @@ NamedDecl *Sema::BuildUsingDeclaration(Scope *S, AccessSpecifier AS,
   if (RequireCompleteDeclContext(SS, LookupContext))
     return BuildInvalid();
 
-  // The normal rules do not apply to inheriting constructor declarations.
-  if (NameInfo.getName().getNameKind() == DeclarationName::CXXConstructorName) {
-    UsingDecl *UD = BuildValid();
-    CheckInheritingConstructorUsingDecl(UD);
-    return UD;
-  }
-
-  // Otherwise, look up the target name.
-
+  // Look up the target name.
   LookupResult R(*this, NameInfo, LookupOrdinaryName);
 
   // Unlike most lookups, we don't always want to hide tag
@@ -7689,13 +8350,18 @@ NamedDecl *Sema::BuildUsingDeclaration(Scope *S, AccessSpecifier AS,
 
   LookupQualifiedName(R, LookupContext);
 
-  // Try to correct typos if possible.
-  if (R.empty()) {
-    UsingValidatorCCC CCC(HasTypenameKeyword, IsInstantiation, SS.getScopeRep(),
-                          dyn_cast<CXXRecordDecl>(CurContext));
-    if (TypoCorrection Corrected = CorrectTypo(R.getLookupNameInfo(),
-                                               R.getLookupKind(), S, &SS, CCC,
-                                               CTK_ErrorRecovery)){
+  // Try to correct typos if possible. If constructor name lookup finds no
+  // results, that means the named class has no explicit constructors, and we
+  // suppressed declaring implicit ones (probably because it's dependent or
+  // invalid).
+  if (R.empty() &&
+      NameInfo.getName().getNameKind() != DeclarationName::CXXConstructorName) {
+    if (TypoCorrection Corrected = CorrectTypo(
+            R.getLookupNameInfo(), R.getLookupKind(), S, &SS,
+            llvm::make_unique<UsingValidatorCCC>(
+                HasTypenameKeyword, IsInstantiation, SS.getScopeRep(),
+                dyn_cast<CXXRecordDecl>(CurContext)),
+            CTK_ErrorRecovery)) {
       // We reject any correction for which ND would be NULL.
       NamedDecl *ND = Corrected.getCorrectionDecl();
 
@@ -7708,6 +8374,9 @@ NamedDecl *Sema::BuildUsingDeclaration(Scope *S, AccessSpecifier AS,
       // If we corrected to an inheriting constructor, handle it as one.
       auto *RD = dyn_cast<CXXRecordDecl>(ND);
       if (RD && RD->isInjectedClassName()) {
+        // The parent of the injected class name is the class itself.
+        RD = cast<CXXRecordDecl>(RD->getParent());
+
         // Fix up the information we'll use to build the using declaration.
         if (Corrected.WillReplaceSpecifier()) {
           NestedNameSpecifierLocBuilder Builder;
@@ -7716,19 +8385,21 @@ NamedDecl *Sema::BuildUsingDeclaration(Scope *S, AccessSpecifier AS,
           QualifierLoc = Builder.getWithLocInContext(Context);
         }
 
-        NameInfo.setName(Context.DeclarationNames.getCXXConstructorName(
-            Context.getCanonicalType(Context.getRecordType(RD))));
-        NameInfo.setNamedTypeInfo(nullptr);
-
-        // Build it and process it as an inheriting constructor.
-        UsingDecl *UD = BuildValid();
-        CheckInheritingConstructorUsingDecl(UD);
-        return UD;
+        // In this case, the name we introduce is the name of a derived class
+        // constructor.
+        auto *CurClass = cast<CXXRecordDecl>(CurContext);
+        UsingName.setName(Context.DeclarationNames.getCXXConstructorName(
+            Context.getCanonicalType(Context.getRecordType(CurClass))));
+        UsingName.setNamedTypeInfo(nullptr);
+        for (auto *Ctor : LookupConstructors(RD))
+          R.addDecl(Ctor);
+        R.resolveKind();
+      } else {
+        // FIXME: Pick up all the declarations if we found an overloaded
+        // function.
+        UsingName.setName(ND->getDeclName());
+        R.addDecl(ND);
       }
-
-      // FIXME: Pick up all the declarations if we found an overloaded function.
-      R.setLookupName(Corrected.getCorrection());
-      R.addDecl(ND);
     } else {
       Diag(IdentLoc, diag::err_no_member)
         << NameInfo.getName() << LookupContext << SS.getRange();
@@ -7759,7 +8430,7 @@ NamedDecl *Sema::BuildUsingDeclaration(Scope *S, AccessSpecifier AS,
     }
   }
 
-  // C++0x N2914 [namespace.udecl]p6:
+  // C++14 [namespace.udecl]p6:
   // A using-declaration shall not name a namespace.
   if (R.getAsSingle<NamespaceDecl>()) {
     Diag(IdentLoc, diag::err_using_decl_can_not_refer_to_namespace)
@@ -7767,7 +8438,28 @@ NamedDecl *Sema::BuildUsingDeclaration(Scope *S, AccessSpecifier AS,
     return BuildInvalid();
   }
 
+  // C++14 [namespace.udecl]p7:
+  // A using-declaration shall not name a scoped enumerator.
+  if (auto *ED = R.getAsSingle<EnumConstantDecl>()) {
+    if (cast<EnumDecl>(ED->getDeclContext())->isScoped()) {
+      Diag(IdentLoc, diag::err_using_decl_can_not_refer_to_scoped_enum)
+        << SS.getRange();
+      return BuildInvalid();
+    }
+  }
+
   UsingDecl *UD = BuildValid();
+
+  // Some additional rules apply to inheriting constructors.
+  if (UsingName.getName().getNameKind() ==
+        DeclarationName::CXXConstructorName) {
+    // Suppress access diagnostics; the access check is instead performed at the
+    // point of use for an inheriting constructor.
+    R.suppressDiagnostics();
+    if (CheckInheritingConstructorUsingDecl(UD))
+      return UD;
+  }
+
   for (LookupResult::iterator I = R.begin(), E = R.end(); I != E; ++I) {
     UsingShadowDecl *PrevDecl = nullptr;
     if (!CheckUsingShadowDecl(UD, *I, Previous, PrevDecl))
@@ -7879,8 +8571,10 @@ bool Sema::CheckUsingDeclQualifier(SourceLocation UsingLoc,
 
     // If we weren't able to compute a valid scope, it must be a
     // dependent class scope.
-    if (!NamedContext || NamedContext->isRecord()) {
-      auto *RD = dyn_cast<CXXRecordDecl>(NamedContext);
+    if (!NamedContext || NamedContext->getRedeclContext()->isRecord()) {
+      DeclContext *RD = NamedContext
+                        ? cast<CXXRecordDecl>(NamedContext->getRedeclContext())
+                        : nullptr;
       if (RD && RequireCompleteDeclContext(const_cast<CXXScopeSpec&>(SS), RD))
         RD = nullptr;
 
@@ -7909,7 +8603,7 @@ bool Sema::CheckUsingDeclQualifier(SourceLocation UsingLoc,
         } else {
           // Convert 'using X::Y;' to 'typedef X::Y Y;'.
           SourceLocation InsertLoc =
-              PP.getLocForEndOfToken(NameInfo.getLocEnd());
+              getLocForEndOfToken(NameInfo.getLocEnd());
           Diag(InsertLoc, diag::note_using_decl_class_member_workaround)
             << 1 // typedef declaration
             << FixItHint::CreateReplacement(UsingLoc, "typedef")
@@ -7928,6 +8622,20 @@ bool Sema::CheckUsingDeclQualifier(SourceLocation UsingLoc,
 
         Diag(UsingLoc, diag::note_using_decl_class_member_workaround)
           << 2 // reference declaration
+          << FixIt;
+      } else if (R.getAsSingle<EnumConstantDecl>()) {
+        // Don't provide a fixit outside C++11 mode; we don't want to suggest
+        // repeating the type of the enumeration here, and we can't do so if
+        // the type is anonymous.
+        FixItHint FixIt;
+        if (getLangOpts().CPlusPlus11) {
+          // Convert 'using X::Y;' to 'auto &Y = X::Y;'.
+          FixIt = FixItHint::CreateReplacement(
+              UsingLoc, "constexpr auto " + NameInfo.getName().getAsString() + " = ");
+        }
+
+        Diag(UsingLoc, diag::note_using_decl_class_member_workaround)
+          << (getLangOpts().CPlusPlus11 ? 4 : 3) // const[expr] variable
           << FixIt;
       }
       return true;
@@ -7964,7 +8672,7 @@ bool Sema::CheckUsingDeclQualifier(SourceLocation UsingLoc,
     return true;
 
   if (getLangOpts().CPlusPlus11) {
-    // C++0x [namespace.udecl]p3:
+    // C++11 [namespace.udecl]p3:
     //   In a using-declaration used as a member-declaration, the
     //   nested-name-specifier shall name a base class of the class
     //   being defined.
@@ -8002,40 +8710,26 @@ bool Sema::CheckUsingDeclQualifier(SourceLocation UsingLoc,
   // in the UsingDecl and UsingShadowDecl so that these checks didn't
   // need to be repeated.
 
-  struct UserData {
-    llvm::SmallPtrSet<const CXXRecordDecl*, 4> Bases;
-
-    static bool collect(const CXXRecordDecl *Base, void *OpaqueData) {
-      UserData *Data = reinterpret_cast<UserData*>(OpaqueData);
-      Data->Bases.insert(Base);
-      return true;
-    }
-
-    bool hasDependentBases(const CXXRecordDecl *Class) {
-      return !Class->forallBases(collect, this);
-    }
-
-    /// Returns true if the base is dependent or is one of the
-    /// accumulated base classes.
-    static bool doesNotContain(const CXXRecordDecl *Base, void *OpaqueData) {
-      UserData *Data = reinterpret_cast<UserData*>(OpaqueData);
-      return !Data->Bases.count(Base);
-    }
-
-    bool mightShareBases(const CXXRecordDecl *Class) {
-      return Bases.count(Class) || !Class->forallBases(doesNotContain, this);
-    }
+  llvm::SmallPtrSet<const CXXRecordDecl *, 4> Bases;
+  auto Collect = [&Bases](const CXXRecordDecl *Base) {
+    Bases.insert(Base);
+    return true;
   };
 
-  UserData Data;
-
-  // Returns false if we find a dependent base.
-  if (Data.hasDependentBases(cast<CXXRecordDecl>(CurContext)))
+  // Collect all bases. Return false if we find a dependent base.
+  if (!cast<CXXRecordDecl>(CurContext)->forallBases(Collect))
     return false;
 
-  // Returns false if the class has a dependent base or if it or one
+  // Returns true if the base is dependent or is one of the accumulated base
+  // classes.
+  auto IsNotBase = [&Bases](const CXXRecordDecl *Base) {
+    return !Bases.count(Base);
+  };
+
+  // Return false if the class has a dependent base or if it or one
   // of its bases is present in the base set of the current context.
-  if (Data.mightShareBases(cast<CXXRecordDecl>(NamedContext)))
+  if (Bases.count(cast<CXXRecordDecl>(NamedContext)) ||
+      !cast<CXXRecordDecl>(NamedContext)->forallBases(IsNotBase))
     return false;
 
   Diag(SS.getRange().getBegin(),
@@ -8053,9 +8747,10 @@ Decl *Sema::ActOnAliasDeclaration(Scope *S,
                                   SourceLocation UsingLoc,
                                   UnqualifiedId &Name,
                                   AttributeList *AttrList,
-                                  TypeResult Type) {
+                                  TypeResult Type,
+                                  Decl *DeclFromDeclSpec) {
   // Skip up to the relevant declaration scope.
-  while (S->getFlags() & Scope::TemplateParamScope)
+  while (S->isTemplateParamScope())
     S = S->getParent();
   assert((S->getFlags() & Scope::DeclScope) &&
          "got alias-declaration outside of declaration scope");
@@ -8118,6 +8813,10 @@ Decl *Sema::ActOnAliasDeclaration(Scope *S,
     }
     TemplateParameterList *TemplateParams = TemplateParamLists[0];
 
+    // Check that we can declare a template here.
+    if (CheckTemplateDeclScope(S, TemplateParams))
+      return nullptr;
+
     // Only consider previous declarations in the same scope.
     FilterLookupForScope(Previous, CurContext, S, /*ConsiderLinkage*/false,
                          /*ExplicitInstantiationOrSpecialization*/false);
@@ -8170,6 +8869,7 @@ Decl *Sema::ActOnAliasDeclaration(Scope *S,
       TypeAliasTemplateDecl::Create(Context, CurContext, UsingLoc,
                                     Name.Identifier, TemplateParams,
                                     NewTD);
+    NewTD->setDescribedAliasTemplate(NewDecl);
 
     NewDecl->setAccess(AS);
 
@@ -8180,6 +8880,10 @@ Decl *Sema::ActOnAliasDeclaration(Scope *S,
 
     NewND = NewDecl;
   } else {
+    if (auto *TD = dyn_cast_or_null<TagDecl>(DeclFromDeclSpec)) {
+      setTagNameForLinkagePurposes(TD, NewTD);
+      handleTagNumbering(TD, S);
+    }
     ActOnTypedefNameDecl(S, CurContext, NewTD, Previous, Redeclaration);
     NewND = NewTD;
   }
@@ -8191,42 +8895,15 @@ Decl *Sema::ActOnAliasDeclaration(Scope *S,
   return NewND;
 }
 
-Decl *Sema::ActOnNamespaceAliasDef(Scope *S,
-                                             SourceLocation NamespaceLoc,
-                                             SourceLocation AliasLoc,
-                                             IdentifierInfo *Alias,
-                                             CXXScopeSpec &SS,
-                                             SourceLocation IdentLoc,
-                                             IdentifierInfo *Ident) {
+Decl *Sema::ActOnNamespaceAliasDef(Scope *S, SourceLocation NamespaceLoc,
+                                   SourceLocation AliasLoc,
+                                   IdentifierInfo *Alias, CXXScopeSpec &SS,
+                                   SourceLocation IdentLoc,
+                                   IdentifierInfo *Ident) {
 
   // Lookup the namespace name.
   LookupResult R(*this, Ident, IdentLoc, LookupNamespaceName);
   LookupParsedName(R, S, &SS);
-
-  // Check if we have a previous declaration with the same name.
-  NamedDecl *PrevDecl
-    = LookupSingleName(S, Alias, AliasLoc, LookupOrdinaryName, 
-                       ForRedeclaration);
-  if (PrevDecl && !isDeclInScope(PrevDecl, CurContext, S))
-    PrevDecl = nullptr;
-
-  if (PrevDecl) {
-    if (NamespaceAliasDecl *AD = dyn_cast<NamespaceAliasDecl>(PrevDecl)) {
-      // We already have an alias with the same name that points to the same
-      // namespace, so don't create a new one.
-      // FIXME: At some point, we'll want to create the (redundant)
-      // declaration to maintain better source information.
-      if (!R.isAmbiguous() && !R.empty() &&
-          AD->getNamespace()->Equals(getNamespaceDecl(R.getFoundDecl())))
-        return nullptr;
-    }
-
-    unsigned DiagID = isa<NamespaceDecl>(PrevDecl) ? diag::err_redefinition :
-      diag::err_redefinition_different_kind;
-    Diag(AliasLoc, DiagID) << Alias;
-    Diag(PrevDecl->getLocation(), diag::note_previous_definition);
-    return nullptr;
-  }
 
   if (R.isAmbiguous())
     return nullptr;
@@ -8237,11 +8914,59 @@ Decl *Sema::ActOnNamespaceAliasDef(Scope *S,
       return nullptr;
     }
   }
+  assert(!R.isAmbiguous() && !R.empty());
+  NamedDecl *ND = R.getRepresentativeDecl();
+
+  // Check if we have a previous declaration with the same name.
+  LookupResult PrevR(*this, Alias, AliasLoc, LookupOrdinaryName,
+                     ForRedeclaration);
+  LookupName(PrevR, S);
+
+  // Check we're not shadowing a template parameter.
+  if (PrevR.isSingleResult() && PrevR.getFoundDecl()->isTemplateParameter()) {
+    DiagnoseTemplateParameterShadow(AliasLoc, PrevR.getFoundDecl());
+    PrevR.clear();
+  }
+
+  // Filter out any other lookup result from an enclosing scope.
+  FilterLookupForScope(PrevR, CurContext, S, /*ConsiderLinkage*/false,
+                       /*AllowInlineNamespace*/false);
+
+  // Find the previous declaration and check that we can redeclare it.
+  NamespaceAliasDecl *Prev = nullptr; 
+  if (PrevR.isSingleResult()) {
+    NamedDecl *PrevDecl = PrevR.getRepresentativeDecl();
+    if (NamespaceAliasDecl *AD = dyn_cast<NamespaceAliasDecl>(PrevDecl)) {
+      // We already have an alias with the same name that points to the same
+      // namespace; check that it matches.
+      if (AD->getNamespace()->Equals(getNamespaceDecl(ND))) {
+        Prev = AD;
+      } else if (isVisible(PrevDecl)) {
+        Diag(AliasLoc, diag::err_redefinition_different_namespace_alias)
+          << Alias;
+        Diag(AD->getLocation(), diag::note_previous_namespace_alias)
+          << AD->getNamespace();
+        return nullptr;
+      }
+    } else if (isVisible(PrevDecl)) {
+      unsigned DiagID = isa<NamespaceDecl>(PrevDecl->getUnderlyingDecl())
+                            ? diag::err_redefinition
+                            : diag::err_redefinition_different_kind;
+      Diag(AliasLoc, DiagID) << Alias;
+      Diag(PrevDecl->getLocation(), diag::note_previous_definition);
+      return nullptr;
+    }
+  }
+
+  // The use of a nested name specifier may trigger deprecation warnings.
+  DiagnoseUseOfDecl(ND, IdentLoc);
 
   NamespaceAliasDecl *AliasDecl =
     NamespaceAliasDecl::Create(Context, CurContext, NamespaceLoc, AliasLoc,
                                Alias, SS.getWithLocInContext(Context),
-                               IdentLoc, R.getFoundDecl());
+                               IdentLoc, ND);
+  if (Prev)
+    AliasDecl->setPreviousDecl(Prev);
 
   PushOnScopeChains(AliasDecl, S);
   return AliasDecl;
@@ -8291,22 +9016,6 @@ Sema::ComputeDefaultedDefaultCtorExceptionSpec(SourceLocation Loc,
     if (F->hasInClassInitializer()) {
       if (Expr *E = F->getInClassInitializer())
         ExceptSpec.CalledExpr(E);
-      else if (!F->isInvalidDecl())
-        // DR1351:
-        //   If the brace-or-equal-initializer of a non-static data member
-        //   invokes a defaulted default constructor of its class or of an
-        //   enclosing class in a potentially evaluated subexpression, the
-        //   program is ill-formed.
-        //
-        // This resolution is unworkable: the exception specification of the
-        // default constructor can be needed in an unevaluated context, in
-        // particular, in the operand of a noexcept-expression, and we can be
-        // unable to compute an exception specification for an enclosed class.
-        //
-        // We do not allow an in-class initializer to require the evaluation
-        // of the exception specification for any in-class initializer whose
-        // definition is not lexically complete.
-        Diag(Loc, diag::err_in_class_initializer_references_def_ctor) << MD;
     } else if (const RecordType *RecordTy
               = Context.getBaseElementType(F->getType())->getAs<RecordType>()) {
       CXXRecordDecl *FieldRecDecl = cast<CXXRecordDecl>(RecordTy->getDecl());
@@ -8325,7 +9034,8 @@ Sema::ComputeDefaultedDefaultCtorExceptionSpec(SourceLocation Loc,
 }
 
 Sema::ImplicitExceptionSpecification
-Sema::ComputeInheritingCtorExceptionSpec(CXXConstructorDecl *CD) {
+Sema::ComputeInheritingCtorExceptionSpec(SourceLocation Loc,
+                                         CXXConstructorDecl *CD) {
   CXXRecordDecl *ClassDecl = CD->getParent();
 
   // C++ [except.spec]p14:
@@ -8334,36 +9044,26 @@ Sema::ComputeInheritingCtorExceptionSpec(CXXConstructorDecl *CD) {
   if (ClassDecl->isInvalidDecl())
     return ExceptSpec;
 
-  // Inherited constructor.
-  const CXXConstructorDecl *InheritedCD = CD->getInheritedConstructor();
-  const CXXRecordDecl *InheritedDecl = InheritedCD->getParent();
-  // FIXME: Copying or moving the parameters could add extra exceptions to the
-  // set, as could the default arguments for the inherited constructor. This
-  // will be addressed when we implement the resolution of core issue 1351.
-  ExceptSpec.CalledDecl(CD->getLocStart(), InheritedCD);
+  auto Inherited = CD->getInheritedConstructor();
+  InheritedConstructorInfo ICI(*this, Loc, Inherited.getShadowDecl());
 
-  // Direct base-class constructors.
-  for (const auto &B : ClassDecl->bases()) {
-    if (B.isVirtual()) // Handled below.
-      continue;
-
-    if (const RecordType *BaseType = B.getType()->getAs<RecordType>()) {
-      CXXRecordDecl *BaseClassDecl = cast<CXXRecordDecl>(BaseType->getDecl());
-      if (BaseClassDecl == InheritedDecl)
+  // Direct and virtual base-class constructors.
+  for (bool VBase : {false, true}) {
+    for (CXXBaseSpecifier &B :
+         VBase ? ClassDecl->vbases() : ClassDecl->bases()) {
+      // Don't visit direct vbases twice.
+      if (B.isVirtual() != VBase)
         continue;
-      CXXConstructorDecl *Constructor = LookupDefaultConstructor(BaseClassDecl);
-      if (Constructor)
-        ExceptSpec.CalledDecl(B.getLocStart(), Constructor);
-    }
-  }
 
-  // Virtual base-class constructors.
-  for (const auto &B : ClassDecl->vbases()) {
-    if (const RecordType *BaseType = B.getType()->getAs<RecordType>()) {
-      CXXRecordDecl *BaseClassDecl = cast<CXXRecordDecl>(BaseType->getDecl());
-      if (BaseClassDecl == InheritedDecl)
+      CXXRecordDecl *BaseClass = B.getType()->getAsCXXRecordDecl();
+      if (!BaseClass)
         continue;
-      CXXConstructorDecl *Constructor = LookupDefaultConstructor(BaseClassDecl);
+
+      CXXConstructorDecl *Constructor =
+          ICI.findConstructorForBase(BaseClass, Inherited.getConstructor())
+              .first;
+      if (!Constructor)
+        Constructor = LookupDefaultConstructor(BaseClass);
       if (Constructor)
         ExceptSpec.CalledDecl(B.getLocStart(), Constructor);
     }
@@ -8374,9 +9074,6 @@ Sema::ComputeInheritingCtorExceptionSpec(CXXConstructorDecl *CD) {
     if (F->hasInClassInitializer()) {
       if (Expr *E = F->getInClassInitializer())
         ExceptSpec.CalledExpr(E);
-      else if (!F->isInvalidDecl())
-        Diag(CD->getLocation(),
-             diag::err_in_class_initializer_references_def_ctor) << CD;
     } else if (const RecordType *RecordTy
               = Context.getBaseElementType(F->getType())->getAs<RecordType>()) {
       CXXRecordDecl *FieldRecDecl = cast<CXXRecordDecl>(RecordTy->getDecl());
@@ -8394,11 +9091,12 @@ namespace {
 struct DeclaringSpecialMember {
   Sema &S;
   Sema::SpecialMemberDecl D;
+  Sema::ContextRAII SavedContext;
   bool WasAlreadyBeingDeclared;
 
   DeclaringSpecialMember(Sema &S, CXXRecordDecl *RD, Sema::CXXSpecialMember CSM)
-    : S(S), D(RD, CSM) {
-    WasAlreadyBeingDeclared = !S.SpecialMembersBeingDeclared.insert(D);
+    : S(S), D(RD, CSM), SavedContext(S, RD) {
+    WasAlreadyBeingDeclared = !S.SpecialMembersBeingDeclared.insert(D).second;
     if (WasAlreadyBeingDeclared)
       // This almost never happens, but if it does, ensure that our cache
       // doesn't contain a stale result.
@@ -8419,6 +9117,21 @@ struct DeclaringSpecialMember {
 };
 }
 
+void Sema::CheckImplicitSpecialMemberDeclaration(Scope *S, FunctionDecl *FD) {
+  // Look up any existing declarations, but don't trigger declaration of all
+  // implicit special members with this name.
+  DeclarationName Name = FD->getDeclName();
+  LookupResult R(*this, Name, SourceLocation(), LookupOrdinaryName,
+                 ForRedeclaration);
+  for (auto *D : FD->getParent()->lookup(Name))
+    if (auto *Acceptable = R.getAcceptableDecl(D))
+      R.addDecl(Acceptable);
+  R.resolveKind();
+  R.suppressDiagnostics();
+
+  CheckFunctionDeclaration(S, FD, R, /*IsExplicitSpecialization*/false);
+}
+
 CXXConstructorDecl *Sema::DeclareImplicitDefaultConstructor(
                                                      CXXRecordDecl *ClassDecl) {
   // C++ [class.ctor]p5:
@@ -8427,7 +9140,7 @@ CXXConstructorDecl *Sema::DeclareImplicitDefaultConstructor(
   //   user-declared constructor for class X, a default constructor is
   //   implicitly declared. An implicitly-declared default constructor
   //   is an inline public member of its class.
-  assert(ClassDecl->needsImplicitDefaultConstructor() && 
+  assert(ClassDecl->needsImplicitDefaultConstructor() &&
          "Should not build implicit default constructor!");
 
   DeclaringSpecialMember DSM(*this, ClassDecl, CXXDefaultConstructor);
@@ -8451,7 +9164,13 @@ CXXConstructorDecl *Sema::DeclareImplicitDefaultConstructor(
       /*isImplicitlyDeclared=*/true, Constexpr);
   DefaultCon->setAccess(AS_public);
   DefaultCon->setDefaulted();
-  DefaultCon->setImplicit();
+
+  if (getLangOpts().CUDA) {
+    inferCUDATargetForImplicitSpecialMember(ClassDecl, CXXDefaultConstructor,
+                                            DefaultCon,
+                                            /* ConstRHS */ false,
+                                            /* Diagnose */ false);
+  }
 
   // Build an exception specification pointing back at this constructor.
   FunctionProtoType::ExtProtoInfo EPI = getImplicitMethodEPI(*this, DefaultCon);
@@ -8461,13 +9180,16 @@ CXXConstructorDecl *Sema::DeclareImplicitDefaultConstructor(
   // constructors is easy to compute.
   DefaultCon->setTrivial(ClassDecl->hasTrivialDefaultConstructor());
 
-  if (ShouldDeleteSpecialMember(DefaultCon, CXXDefaultConstructor))
-    SetDeclDeleted(DefaultCon, ClassLoc);
-
   // Note that we have declared this constructor.
   ++ASTContext::NumImplicitDefaultConstructorsDeclared;
 
-  if (Scope *S = getScopeForContext(ClassDecl))
+  Scope *S = getScopeForContext(ClassDecl);
+  CheckImplicitSpecialMemberDeclaration(S, DefaultCon);
+
+  if (ShouldDeleteSpecialMember(DefaultCon, CXXDefaultConstructor))
+    SetDeclDeleted(DefaultCon, ClassLoc);
+
+  if (S)
     PushOnScopeChains(DefaultCon, S, false);
   ClassDecl->addDecl(DefaultCon);
 
@@ -8494,6 +9216,11 @@ void Sema::DefineImplicitDefaultConstructor(SourceLocation CurrentLocation,
     return;
   }
 
+  // The exception specification is needed because we are defining the
+  // function.
+  ResolveExceptionSpec(CurrentLocation,
+                       Constructor->getType()->castAs<FunctionProtoType>());
+
   SourceLocation Loc = Constructor->getLocEnd().isValid()
                            ? Constructor->getLocEnd()
                            : Constructor->getLocation();
@@ -8514,304 +9241,94 @@ void Sema::ActOnFinishDelayedMemberInitializers(Decl *D) {
   CheckDelayedMemberExceptionSpecs();
 }
 
-namespace {
-/// Information on inheriting constructors to declare.
-class InheritingConstructorInfo {
-public:
-  InheritingConstructorInfo(Sema &SemaRef, CXXRecordDecl *Derived)
-      : SemaRef(SemaRef), Derived(Derived) {
-    // Mark the constructors that we already have in the derived class.
-    //
-    // C++11 [class.inhctor]p3: [...] a constructor is implicitly declared [...]
-    //   unless there is a user-declared constructor with the same signature in
-    //   the class where the using-declaration appears.
-    visitAll(Derived, &InheritingConstructorInfo::noteDeclaredInDerived);
-  }
+/// Find or create the fake constructor we synthesize to model constructing an
+/// object of a derived class via a constructor of a base class.
+CXXConstructorDecl *
+Sema::findInheritingConstructor(SourceLocation Loc,
+                                CXXConstructorDecl *BaseCtor,
+                                ConstructorUsingShadowDecl *Shadow) {
+  CXXRecordDecl *Derived = Shadow->getParent();
+  SourceLocation UsingLoc = Shadow->getLocation();
 
-  void inheritAll(CXXRecordDecl *RD) {
-    visitAll(RD, &InheritingConstructorInfo::inherit);
-  }
+  // FIXME: Add a new kind of DeclarationName for an inherited constructor.
+  // For now we use the name of the base class constructor as a member of the
+  // derived class to indicate a (fake) inherited constructor name.
+  DeclarationName Name = BaseCtor->getDeclName();
 
-private:
-  /// Information about an inheriting constructor.
-  struct InheritingConstructor {
-    InheritingConstructor()
-      : DeclaredInDerived(false), BaseCtor(nullptr), DerivedCtor(nullptr) {}
+  // Check to see if we already have a fake constructor for this inherited
+  // constructor call.
+  for (NamedDecl *Ctor : Derived->lookup(Name))
+    if (declaresSameEntity(cast<CXXConstructorDecl>(Ctor)
+                               ->getInheritedConstructor()
+                               .getConstructor(),
+                           BaseCtor))
+      return cast<CXXConstructorDecl>(Ctor);
 
-    /// If \c true, a constructor with this signature is already declared
-    /// in the derived class.
-    bool DeclaredInDerived;
+  DeclarationNameInfo NameInfo(Name, UsingLoc);
+  TypeSourceInfo *TInfo =
+      Context.getTrivialTypeSourceInfo(BaseCtor->getType(), UsingLoc);
+  FunctionProtoTypeLoc ProtoLoc =
+      TInfo->getTypeLoc().IgnoreParens().castAs<FunctionProtoTypeLoc>();
 
-    /// The constructor which is inherited.
-    const CXXConstructorDecl *BaseCtor;
+  // Check the inherited constructor is valid and find the list of base classes
+  // from which it was inherited.
+  InheritedConstructorInfo ICI(*this, Loc, Shadow);
 
-    /// The derived constructor we declared.
-    CXXConstructorDecl *DerivedCtor;
-  };
+  bool Constexpr =
+      BaseCtor->isConstexpr() &&
+      defaultedSpecialMemberIsConstexpr(*this, Derived, CXXDefaultConstructor,
+                                        false, BaseCtor, &ICI);
 
-  /// Inheriting constructors with a given canonical type. There can be at
-  /// most one such non-template constructor, and any number of templated
-  /// constructors.
-  struct InheritingConstructorsForType {
-    InheritingConstructor NonTemplate;
-    SmallVector<std::pair<TemplateParameterList *, InheritingConstructor>, 4>
-        Templates;
+  CXXConstructorDecl *DerivedCtor = CXXConstructorDecl::Create(
+      Context, Derived, UsingLoc, NameInfo, TInfo->getType(), TInfo,
+      BaseCtor->isExplicit(), /*Inline=*/true,
+      /*ImplicitlyDeclared=*/true, Constexpr,
+      InheritedConstructor(Shadow, BaseCtor));
+  if (Shadow->isInvalidDecl())
+    DerivedCtor->setInvalidDecl();
 
-    InheritingConstructor &getEntry(Sema &S, const CXXConstructorDecl *Ctor) {
-      if (FunctionTemplateDecl *FTD = Ctor->getDescribedFunctionTemplate()) {
-        TemplateParameterList *ParamList = FTD->getTemplateParameters();
-        for (unsigned I = 0, N = Templates.size(); I != N; ++I)
-          if (S.TemplateParameterListsAreEqual(ParamList, Templates[I].first,
-                                               false, S.TPL_TemplateMatch))
-            return Templates[I].second;
-        Templates.push_back(std::make_pair(ParamList, InheritingConstructor()));
-        return Templates.back().second;
-      }
+  // Build an unevaluated exception specification for this fake constructor.
+  const FunctionProtoType *FPT = TInfo->getType()->castAs<FunctionProtoType>();
+  FunctionProtoType::ExtProtoInfo EPI = FPT->getExtProtoInfo();
+  EPI.ExceptionSpec.Type = EST_Unevaluated;
+  EPI.ExceptionSpec.SourceDecl = DerivedCtor;
+  DerivedCtor->setType(Context.getFunctionType(FPT->getReturnType(),
+                                               FPT->getParamTypes(), EPI));
 
-      return NonTemplate;
-    }
-  };
-
-  /// Get or create the inheriting constructor record for a constructor.
-  InheritingConstructor &getEntry(const CXXConstructorDecl *Ctor,
-                                  QualType CtorType) {
-    return Map[CtorType.getCanonicalType()->castAs<FunctionProtoType>()]
-        .getEntry(SemaRef, Ctor);
-  }
-
-  typedef void (InheritingConstructorInfo::*VisitFn)(const CXXConstructorDecl*);
-
-  /// Process all constructors for a class.
-  void visitAll(const CXXRecordDecl *RD, VisitFn Callback) {
-    for (const auto *Ctor : RD->ctors())
-      (this->*Callback)(Ctor);
-    for (CXXRecordDecl::specific_decl_iterator<FunctionTemplateDecl>
-             I(RD->decls_begin()), E(RD->decls_end());
-         I != E; ++I) {
-      const FunctionDecl *FD = (*I)->getTemplatedDecl();
-      if (const CXXConstructorDecl *CD = dyn_cast<CXXConstructorDecl>(FD))
-        (this->*Callback)(CD);
-    }
-  }
-
-  /// Note that a constructor (or constructor template) was declared in Derived.
-  void noteDeclaredInDerived(const CXXConstructorDecl *Ctor) {
-    getEntry(Ctor, Ctor->getType()).DeclaredInDerived = true;
-  }
-
-  /// Inherit a single constructor.
-  void inherit(const CXXConstructorDecl *Ctor) {
-    const FunctionProtoType *CtorType =
-        Ctor->getType()->castAs<FunctionProtoType>();
-    ArrayRef<QualType> ArgTypes(CtorType->getParamTypes());
-    FunctionProtoType::ExtProtoInfo EPI = CtorType->getExtProtoInfo();
-
-    SourceLocation UsingLoc = getUsingLoc(Ctor->getParent());
-
-    // Core issue (no number yet): the ellipsis is always discarded.
-    if (EPI.Variadic) {
-      SemaRef.Diag(UsingLoc, diag::warn_using_decl_constructor_ellipsis);
-      SemaRef.Diag(Ctor->getLocation(),
-                   diag::note_using_decl_constructor_ellipsis);
-      EPI.Variadic = false;
-    }
-
-    // Declare a constructor for each number of parameters.
-    //
-    // C++11 [class.inhctor]p1:
-    //   The candidate set of inherited constructors from the class X named in
-    //   the using-declaration consists of [... modulo defects ...] for each
-    //   constructor or constructor template of X, the set of constructors or
-    //   constructor templates that results from omitting any ellipsis parameter
-    //   specification and successively omitting parameters with a default
-    //   argument from the end of the parameter-type-list
-    unsigned MinParams = minParamsToInherit(Ctor);
-    unsigned Params = Ctor->getNumParams();
-    if (Params >= MinParams) {
-      do
-        declareCtor(UsingLoc, Ctor,
-                    SemaRef.Context.getFunctionType(
-                        Ctor->getReturnType(), ArgTypes.slice(0, Params), EPI));
-      while (Params > MinParams &&
-             Ctor->getParamDecl(--Params)->hasDefaultArg());
-    }
-  }
-
-  /// Find the using-declaration which specified that we should inherit the
-  /// constructors of \p Base.
-  SourceLocation getUsingLoc(const CXXRecordDecl *Base) {
-    // No fancy lookup required; just look for the base constructor name
-    // directly within the derived class.
-    ASTContext &Context = SemaRef.Context;
-    DeclarationName Name = Context.DeclarationNames.getCXXConstructorName(
-        Context.getCanonicalType(Context.getRecordType(Base)));
-    DeclContext::lookup_const_result Decls = Derived->lookup(Name);
-    return Decls.empty() ? Derived->getLocation() : Decls[0]->getLocation();
-  }
-
-  unsigned minParamsToInherit(const CXXConstructorDecl *Ctor) {
-    // C++11 [class.inhctor]p3:
-    //   [F]or each constructor template in the candidate set of inherited
-    //   constructors, a constructor template is implicitly declared
-    if (Ctor->getDescribedFunctionTemplate())
-      return 0;
-
-    //   For each non-template constructor in the candidate set of inherited
-    //   constructors other than a constructor having no parameters or a
-    //   copy/move constructor having a single parameter, a constructor is
-    //   implicitly declared [...]
-    if (Ctor->getNumParams() == 0)
-      return 1;
-    if (Ctor->isCopyOrMoveConstructor())
-      return 2;
-
-    // Per discussion on core reflector, never inherit a constructor which
-    // would become a default, copy, or move constructor of Derived either.
-    const ParmVarDecl *PD = Ctor->getParamDecl(0);
-    const ReferenceType *RT = PD->getType()->getAs<ReferenceType>();
-    return (RT && RT->getPointeeCXXRecordDecl() == Derived) ? 2 : 1;
-  }
-
-  /// Declare a single inheriting constructor, inheriting the specified
-  /// constructor, with the given type.
-  void declareCtor(SourceLocation UsingLoc, const CXXConstructorDecl *BaseCtor,
-                   QualType DerivedType) {
-    InheritingConstructor &Entry = getEntry(BaseCtor, DerivedType);
-
-    // C++11 [class.inhctor]p3:
-    //   ... a constructor is implicitly declared with the same constructor
-    //   characteristics unless there is a user-declared constructor with
-    //   the same signature in the class where the using-declaration appears
-    if (Entry.DeclaredInDerived)
-      return;
-
-    // C++11 [class.inhctor]p7:
-    //   If two using-declarations declare inheriting constructors with the
-    //   same signature, the program is ill-formed
-    if (Entry.DerivedCtor) {
-      if (BaseCtor->getParent() != Entry.BaseCtor->getParent()) {
-        // Only diagnose this once per constructor.
-        if (Entry.DerivedCtor->isInvalidDecl())
-          return;
-        Entry.DerivedCtor->setInvalidDecl();
-
-        SemaRef.Diag(UsingLoc, diag::err_using_decl_constructor_conflict);
-        SemaRef.Diag(BaseCtor->getLocation(),
-                     diag::note_using_decl_constructor_conflict_current_ctor);
-        SemaRef.Diag(Entry.BaseCtor->getLocation(),
-                     diag::note_using_decl_constructor_conflict_previous_ctor);
-        SemaRef.Diag(Entry.DerivedCtor->getLocation(),
-                     diag::note_using_decl_constructor_conflict_previous_using);
-      } else {
-        // Core issue (no number): if the same inheriting constructor is
-        // produced by multiple base class constructors from the same base
-        // class, the inheriting constructor is defined as deleted.
-        SemaRef.SetDeclDeleted(Entry.DerivedCtor, UsingLoc);
-      }
-
-      return;
-    }
-
-    ASTContext &Context = SemaRef.Context;
-    DeclarationName Name = Context.DeclarationNames.getCXXConstructorName(
-        Context.getCanonicalType(Context.getRecordType(Derived)));
-    DeclarationNameInfo NameInfo(Name, UsingLoc);
-
-    TemplateParameterList *TemplateParams = nullptr;
-    if (const FunctionTemplateDecl *FTD =
-            BaseCtor->getDescribedFunctionTemplate()) {
-      TemplateParams = FTD->getTemplateParameters();
-      // We're reusing template parameters from a different DeclContext. This
-      // is questionable at best, but works out because the template depth in
-      // both places is guaranteed to be 0.
-      // FIXME: Rebuild the template parameters in the new context, and
-      // transform the function type to refer to them.
-    }
-
-    // Build type source info pointing at the using-declaration. This is
-    // required by template instantiation.
+  // Build the parameter declarations.
+  SmallVector<ParmVarDecl *, 16> ParamDecls;
+  for (unsigned I = 0, N = FPT->getNumParams(); I != N; ++I) {
     TypeSourceInfo *TInfo =
-        Context.getTrivialTypeSourceInfo(DerivedType, UsingLoc);
-    FunctionProtoTypeLoc ProtoLoc =
-        TInfo->getTypeLoc().IgnoreParens().castAs<FunctionProtoTypeLoc>();
-
-    CXXConstructorDecl *DerivedCtor = CXXConstructorDecl::Create(
-        Context, Derived, UsingLoc, NameInfo, DerivedType,
-        TInfo, BaseCtor->isExplicit(), /*Inline=*/true,
-        /*ImplicitlyDeclared=*/true, /*Constexpr=*/BaseCtor->isConstexpr());
-
-    // Build an unevaluated exception specification for this constructor.
-    const FunctionProtoType *FPT = DerivedType->castAs<FunctionProtoType>();
-    FunctionProtoType::ExtProtoInfo EPI = FPT->getExtProtoInfo();
-    EPI.ExceptionSpec.Type = EST_Unevaluated;
-    EPI.ExceptionSpec.SourceDecl = DerivedCtor;
-    DerivedCtor->setType(Context.getFunctionType(FPT->getReturnType(),
-                                                 FPT->getParamTypes(), EPI));
-
-    // Build the parameter declarations.
-    SmallVector<ParmVarDecl *, 16> ParamDecls;
-    for (unsigned I = 0, N = FPT->getNumParams(); I != N; ++I) {
-      TypeSourceInfo *TInfo =
-          Context.getTrivialTypeSourceInfo(FPT->getParamType(I), UsingLoc);
-      ParmVarDecl *PD = ParmVarDecl::Create(
-          Context, DerivedCtor, UsingLoc, UsingLoc, /*IdentifierInfo=*/nullptr,
-          FPT->getParamType(I), TInfo, SC_None, /*DefaultArg=*/nullptr);
-      PD->setScopeInfo(0, I);
-      PD->setImplicit();
-      ParamDecls.push_back(PD);
-      ProtoLoc.setParam(I, PD);
-    }
-
-    // Set up the new constructor.
-    DerivedCtor->setAccess(BaseCtor->getAccess());
-    DerivedCtor->setParams(ParamDecls);
-    DerivedCtor->setInheritedConstructor(BaseCtor);
-    if (BaseCtor->isDeleted())
-      SemaRef.SetDeclDeleted(DerivedCtor, UsingLoc);
-
-    // If this is a constructor template, build the template declaration.
-    if (TemplateParams) {
-      FunctionTemplateDecl *DerivedTemplate =
-          FunctionTemplateDecl::Create(SemaRef.Context, Derived, UsingLoc, Name,
-                                       TemplateParams, DerivedCtor);
-      DerivedTemplate->setAccess(BaseCtor->getAccess());
-      DerivedCtor->setDescribedFunctionTemplate(DerivedTemplate);
-      Derived->addDecl(DerivedTemplate);
-    } else {
-      Derived->addDecl(DerivedCtor);
-    }
-
-    Entry.BaseCtor = BaseCtor;
-    Entry.DerivedCtor = DerivedCtor;
+        Context.getTrivialTypeSourceInfo(FPT->getParamType(I), UsingLoc);
+    ParmVarDecl *PD = ParmVarDecl::Create(
+        Context, DerivedCtor, UsingLoc, UsingLoc, /*IdentifierInfo=*/nullptr,
+        FPT->getParamType(I), TInfo, SC_None, /*DefaultArg=*/nullptr);
+    PD->setScopeInfo(0, I);
+    PD->setImplicit();
+    // Ensure attributes are propagated onto parameters (this matters for
+    // format, pass_object_size, ...).
+    mergeDeclAttributes(PD, BaseCtor->getParamDecl(I));
+    ParamDecls.push_back(PD);
+    ProtoLoc.setParam(I, PD);
   }
 
-  Sema &SemaRef;
-  CXXRecordDecl *Derived;
-  typedef llvm::DenseMap<const Type *, InheritingConstructorsForType> MapType;
-  MapType Map;
-};
+  // Set up the new constructor.
+  assert(!BaseCtor->isDeleted() && "should not use deleted constructor");
+  DerivedCtor->setAccess(BaseCtor->getAccess());
+  DerivedCtor->setParams(ParamDecls);
+  Derived->addDecl(DerivedCtor);
+
+  if (ShouldDeleteSpecialMember(DerivedCtor, CXXDefaultConstructor, &ICI))
+    SetDeclDeleted(DerivedCtor, UsingLoc);
+
+  return DerivedCtor;
 }
 
-void Sema::DeclareInheritingConstructors(CXXRecordDecl *ClassDecl) {
-  // Defer declaring the inheriting constructors until the class is
-  // instantiated.
-  if (ClassDecl->isDependentContext())
-    return;
-
-  // Find base classes from which we might inherit constructors.
-  SmallVector<CXXRecordDecl*, 4> InheritedBases;
-  for (const auto &BaseIt : ClassDecl->bases())
-    if (BaseIt.getInheritConstructors())
-      InheritedBases.push_back(BaseIt.getType()->getAsCXXRecordDecl());
-
-  // Go no further if we're not inheriting any constructors.
-  if (InheritedBases.empty())
-    return;
-
-  // Declare the inherited constructors.
-  InheritingConstructorInfo ICI(*this, ClassDecl);
-  for (unsigned I = 0, N = InheritedBases.size(); I != N; ++I)
-    ICI.inheritAll(InheritedBases[I]);
+void Sema::NoteDeletedInheritingConstructor(CXXConstructorDecl *Ctor) {
+  InheritedConstructorInfo ICI(*this, Ctor->getLocation(),
+                               Ctor->getInheritedConstructor().getShadowDecl());
+  ShouldDeleteSpecialMember(Ctor, CXXDefaultConstructor, &ICI,
+                            /*Diagnose*/true);
 }
 
 void Sema::DefineInheritingConstructor(SourceLocation CurrentLocation,
@@ -8820,19 +9337,71 @@ void Sema::DefineInheritingConstructor(SourceLocation CurrentLocation,
   assert(Constructor->getInheritedConstructor() &&
          !Constructor->doesThisDeclarationHaveABody() &&
          !Constructor->isDeleted());
+  if (Constructor->isInvalidDecl())
+    return;
 
+  ConstructorUsingShadowDecl *Shadow =
+      Constructor->getInheritedConstructor().getShadowDecl();
+  CXXConstructorDecl *InheritedCtor =
+      Constructor->getInheritedConstructor().getConstructor();
+
+  // [class.inhctor.init]p1:
+  //   initialization proceeds as if a defaulted default constructor is used to
+  //   initialize the D object and each base class subobject from which the
+  //   constructor was inherited
+
+  InheritedConstructorInfo ICI(*this, CurrentLocation, Shadow);
+  CXXRecordDecl *RD = Shadow->getParent();
+  SourceLocation InitLoc = Shadow->getLocation();
+
+  // Initializations are performed "as if by a defaulted default constructor",
+  // so enter the appropriate scope.
   SynthesizedFunctionScope Scope(*this, Constructor);
   DiagnosticErrorTrap Trap(Diags);
-  if (SetCtorInitializers(Constructor, /*AnyErrors=*/false) ||
-      Trap.hasErrorOccurred()) {
-    Diag(CurrentLocation, diag::note_inhctor_synthesized_at)
-      << Context.getTagDeclType(ClassDecl);
+
+  // Build explicit initializers for all base classes from which the
+  // constructor was inherited.
+  SmallVector<CXXCtorInitializer*, 8> Inits;
+  for (bool VBase : {false, true}) {
+    for (CXXBaseSpecifier &B : VBase ? RD->vbases() : RD->bases()) {
+      if (B.isVirtual() != VBase)
+        continue;
+
+      auto *BaseRD = B.getType()->getAsCXXRecordDecl();
+      if (!BaseRD)
+        continue;
+
+      auto BaseCtor = ICI.findConstructorForBase(BaseRD, InheritedCtor);
+      if (!BaseCtor.first)
+        continue;
+
+      MarkFunctionReferenced(CurrentLocation, BaseCtor.first);
+      ExprResult Init = new (Context) CXXInheritedCtorInitExpr(
+          InitLoc, B.getType(), BaseCtor.first, VBase, BaseCtor.second);
+
+      auto *TInfo = Context.getTrivialTypeSourceInfo(B.getType(), InitLoc);
+      Inits.push_back(new (Context) CXXCtorInitializer(
+          Context, TInfo, VBase, InitLoc, Init.get(), InitLoc,
+          SourceLocation()));
+    }
+  }
+
+  // We now proceed as if for a defaulted default constructor, with the relevant
+  // initializers replaced.
+
+  bool HadError = SetCtorInitializers(Constructor, /*AnyErrors*/false, Inits);
+  if (HadError || Trap.hasErrorOccurred()) {
+    Diag(CurrentLocation, diag::note_inhctor_synthesized_at) << RD;
     Constructor->setInvalidDecl();
     return;
   }
 
-  SourceLocation Loc = Constructor->getLocation();
-  Constructor->setBody(new (Context) CompoundStmt(Loc));
+  // The exception specification is needed because we are defining the
+  // function.
+  ResolveExceptionSpec(CurrentLocation,
+                       Constructor->getType()->castAs<FunctionProtoType>());
+
+  Constructor->setBody(new (Context) CompoundStmt(InitLoc));
 
   Constructor->markUsed(Context);
   MarkVTableUsed(CurrentLocation, ClassDecl);
@@ -8840,8 +9409,9 @@ void Sema::DefineInheritingConstructor(SourceLocation CurrentLocation,
   if (ASTMutationListener *L = getASTMutationListener()) {
     L->CompletedImplicitDefinition(Constructor);
   }
-}
 
+  DiagnoseUninitializedFields(*this, Constructor);
+}
 
 Sema::ImplicitExceptionSpecification
 Sema::ComputeDefaultedDtorExceptionSpec(CXXMethodDecl *MD) {
@@ -8906,26 +9476,33 @@ CXXDestructorDecl *Sema::DeclareImplicitDestructor(CXXRecordDecl *ClassDecl) {
                                   /*isImplicitlyDeclared=*/true);
   Destructor->setAccess(AS_public);
   Destructor->setDefaulted();
-  Destructor->setImplicit();
+
+  if (getLangOpts().CUDA) {
+    inferCUDATargetForImplicitSpecialMember(ClassDecl, CXXDestructor,
+                                            Destructor,
+                                            /* ConstRHS */ false,
+                                            /* Diagnose */ false);
+  }
 
   // Build an exception specification pointing back at this destructor.
   FunctionProtoType::ExtProtoInfo EPI = getImplicitMethodEPI(*this, Destructor);
   Destructor->setType(Context.getFunctionType(Context.VoidTy, None, EPI));
 
-  AddOverriddenMethods(ClassDecl, Destructor);
-
   // We don't need to use SpecialMemberIsTrivial here; triviality for
   // destructors is easy to compute.
   Destructor->setTrivial(ClassDecl->hasTrivialDestructor());
 
-  if (ShouldDeleteSpecialMember(Destructor, CXXDestructor))
-    SetDeclDeleted(Destructor, ClassLoc);
-
   // Note that we have declared this destructor.
   ++ASTContext::NumImplicitDestructorsDeclared;
 
+  Scope *S = getScopeForContext(ClassDecl);
+  CheckImplicitSpecialMemberDeclaration(S, Destructor);
+
+  if (ShouldDeleteSpecialMember(Destructor, CXXDestructor))
+    SetDeclDeleted(Destructor, ClassLoc);
+
   // Introduce this destructor into its scope.
-  if (Scope *S = getScopeForContext(ClassDecl))
+  if (S)
     PushOnScopeChains(Destructor, S, false);
   ClassDecl->addDecl(Destructor);
 
@@ -8958,6 +9535,11 @@ void Sema::DefineImplicitDestructor(SourceLocation CurrentLocation,
     return;
   }
 
+  // The exception specification is needed because we are defining the
+  // function.
+  ResolveExceptionSpec(CurrentLocation,
+                       Destructor->getType()->castAs<FunctionProtoType>());
+
   SourceLocation Loc = Destructor->getLocEnd().isValid()
                            ? Destructor->getLocEnd()
                            : Destructor->getLocation();
@@ -8977,9 +9559,83 @@ void Sema::ActOnFinishCXXMemberDecls() {
   if (CXXRecordDecl *Record = dyn_cast<CXXRecordDecl>(CurContext)) {
     if (Record->isInvalidDecl()) {
       DelayedDefaultedMemberExceptionSpecs.clear();
-      DelayedDestructorExceptionSpecChecks.clear();
+      DelayedExceptionSpecChecks.clear();
       return;
     }
+  }
+}
+
+static void getDefaultArgExprsForConstructors(Sema &S, CXXRecordDecl *Class) {
+  // Don't do anything for template patterns.
+  if (Class->getDescribedClassTemplate())
+    return;
+
+  CallingConv ExpectedCallingConv = S.Context.getDefaultCallingConvention(
+      /*IsVariadic=*/false, /*IsCXXMethod=*/true);
+
+  CXXConstructorDecl *LastExportedDefaultCtor = nullptr;
+  for (Decl *Member : Class->decls()) {
+    auto *CD = dyn_cast<CXXConstructorDecl>(Member);
+    if (!CD) {
+      // Recurse on nested classes.
+      if (auto *NestedRD = dyn_cast<CXXRecordDecl>(Member))
+        getDefaultArgExprsForConstructors(S, NestedRD);
+      continue;
+    } else if (!CD->isDefaultConstructor() || !CD->hasAttr<DLLExportAttr>()) {
+      continue;
+    }
+
+    CallingConv ActualCallingConv =
+        CD->getType()->getAs<FunctionProtoType>()->getCallConv();
+
+    // Skip default constructors with typical calling conventions and no default
+    // arguments.
+    unsigned NumParams = CD->getNumParams();
+    if (ExpectedCallingConv == ActualCallingConv && NumParams == 0)
+      continue;
+
+    if (LastExportedDefaultCtor) {
+      S.Diag(LastExportedDefaultCtor->getLocation(),
+             diag::err_attribute_dll_ambiguous_default_ctor) << Class;
+      S.Diag(CD->getLocation(), diag::note_entity_declared_at)
+          << CD->getDeclName();
+      return;
+    }
+    LastExportedDefaultCtor = CD;
+
+    for (unsigned I = 0; I != NumParams; ++I) {
+      // Skip any default arguments that we've already instantiated.
+      if (S.Context.getDefaultArgExprForConstructor(CD, I))
+        continue;
+
+      Expr *DefaultArg = S.BuildCXXDefaultArgExpr(Class->getLocation(), CD,
+                                                  CD->getParamDecl(I)).get();
+      S.DiscardCleanupsInEvaluationContext();
+      S.Context.addDefaultArgExprForConstructor(CD, I, DefaultArg);
+    }
+  }
+}
+
+void Sema::ActOnFinishCXXNonNestedClass(Decl *D) {
+  auto *RD = dyn_cast<CXXRecordDecl>(D);
+
+  // Default constructors that are annotated with __declspec(dllexport) which
+  // have default arguments or don't use the standard calling convention are
+  // wrapped with a thunk called the default constructor closure.
+  if (RD && Context.getTargetInfo().getCXXABI().isMicrosoft())
+    getDefaultArgExprsForConstructors(*this, RD);
+
+  referenceDLLExportedClassMethods();
+}
+
+void Sema::referenceDLLExportedClassMethods() {
+  if (!DelayedDllExportClasses.empty()) {
+    // Calling ReferenceDllExportedMethods might cause the current function to
+    // be called again, so use a local copy of DelayedDllExportClasses.
+    SmallVector<CXXRecordDecl *, 4> WorkList;
+    std::swap(DelayedDllExportClasses, WorkList);
+    for (CXXRecordDecl *Class : WorkList)
+      ReferenceDllExportedMethods(*this, Class);
   }
 }
 
@@ -9017,8 +9673,8 @@ namespace {
 //  copy/move operators. These classes serve as factory functions and help us
 //  avoid using the same Expr* in the AST twice.
 class ExprBuilder {
-  ExprBuilder(const ExprBuilder&) LLVM_DELETED_FUNCTION;
-  ExprBuilder &operator=(const ExprBuilder&) LLVM_DELETED_FUNCTION;
+  ExprBuilder(const ExprBuilder&) = delete;
+  ExprBuilder &operator=(const ExprBuilder&) = delete;
 
 protected:
   static Expr *assertNotNull(Expr *E) {
@@ -9038,7 +9694,7 @@ class RefBuilder: public ExprBuilder {
   QualType VarType;
 
 public:
-  virtual Expr *build(Sema &S, SourceLocation Loc) const override {
+  Expr *build(Sema &S, SourceLocation Loc) const override {
     return assertNotNull(S.BuildDeclRefExpr(Var, VarType, VK_LValue, Loc).get());
   }
 
@@ -9048,7 +9704,7 @@ public:
 
 class ThisBuilder: public ExprBuilder {
 public:
-  virtual Expr *build(Sema &S, SourceLocation Loc) const override {
+  Expr *build(Sema &S, SourceLocation Loc) const override {
     return assertNotNull(S.ActOnCXXThis(Loc).getAs<Expr>());
   }
 };
@@ -9060,7 +9716,7 @@ class CastBuilder: public ExprBuilder {
   const CXXCastPath &Path;
 
 public:
-  virtual Expr *build(Sema &S, SourceLocation Loc) const override {
+  Expr *build(Sema &S, SourceLocation Loc) const override {
     return assertNotNull(S.ImpCastExprToType(Builder.build(S, Loc), Type,
                                              CK_UncheckedDerivedToBase, Kind,
                                              &Path).get());
@@ -9075,7 +9731,7 @@ class DerefBuilder: public ExprBuilder {
   const ExprBuilder &Builder;
 
 public:
-  virtual Expr *build(Sema &S, SourceLocation Loc) const override {
+  Expr *build(Sema &S, SourceLocation Loc) const override {
     return assertNotNull(
         S.CreateBuiltinUnaryOp(Loc, UO_Deref, Builder.build(S, Loc)).get());
   }
@@ -9091,10 +9747,10 @@ class MemberBuilder: public ExprBuilder {
   LookupResult &MemberLookup;
 
 public:
-  virtual Expr *build(Sema &S, SourceLocation Loc) const override {
+  Expr *build(Sema &S, SourceLocation Loc) const override {
     return assertNotNull(S.BuildMemberReferenceExpr(
         Builder.build(S, Loc), Type, Loc, IsArrow, SS, SourceLocation(),
-        nullptr, MemberLookup, nullptr).get());
+        nullptr, MemberLookup, nullptr, nullptr).get());
   }
 
   MemberBuilder(const ExprBuilder &Builder, QualType Type, bool IsArrow,
@@ -9107,7 +9763,7 @@ class MoveCastBuilder: public ExprBuilder {
   const ExprBuilder &Builder;
 
 public:
-  virtual Expr *build(Sema &S, SourceLocation Loc) const override {
+  Expr *build(Sema &S, SourceLocation Loc) const override {
     return assertNotNull(CastForMoving(S, Builder.build(S, Loc)));
   }
 
@@ -9118,7 +9774,7 @@ class LvalueConvBuilder: public ExprBuilder {
   const ExprBuilder &Builder;
 
 public:
-  virtual Expr *build(Sema &S, SourceLocation Loc) const override {
+  Expr *build(Sema &S, SourceLocation Loc) const override {
     return assertNotNull(
         S.DefaultLvalueConversion(Builder.build(S, Loc)).get());
   }
@@ -9131,7 +9787,7 @@ class SubscriptBuilder: public ExprBuilder {
   const ExprBuilder &Index;
 
 public:
-  virtual Expr *build(Sema &S, SourceLocation Loc) const override {
+  Expr *build(Sema &S, SourceLocation Loc) const override {
     return assertNotNull(S.CreateBuiltinArraySubscriptExpr(
         Base.build(S, Loc), Loc, Index.build(S, Loc), Loc).get());
   }
@@ -9304,7 +9960,7 @@ buildSingleCopyAssignRecursively(Sema &S, SourceLocation Loc, QualType T,
                                    SS, /*TemplateKWLoc=*/SourceLocation(),
                                    /*FirstQualifierInScope=*/nullptr,
                                    OpLookup,
-                                   /*TemplateArgs=*/nullptr,
+                                   /*TemplateArgs=*/nullptr, /*S*/nullptr,
                                    /*SuppressQualifierCheck=*/true);
     if (OpEqualRef.isInvalid())
       return StmtError();
@@ -9409,10 +10065,10 @@ buildSingleCopyAssignRecursively(Sema &S, SourceLocation Loc, QualType T,
                                     SizeType, VK_LValue, OK_Ordinary, Loc);
 
   // Construct the loop that copies all elements of this array.
-  return S.ActOnForStmt(Loc, Loc, InitStmt, 
-                        S.MakeFullExpr(Comparison),
-                        nullptr, S.MakeFullDiscardedValueExpr(Increment),
-                        Loc, Copy.get());
+  return S.ActOnForStmt(
+      Loc, Loc, InitStmt,
+      S.ActOnCondition(nullptr, Loc, Comparison, Sema::ConditionKind::Boolean),
+      S.MakeFullDiscardedValueExpr(Increment), Loc, Copy.get());
 }
 
 static StmtResult
@@ -9527,6 +10183,13 @@ CXXMethodDecl *Sema::DeclareImplicitCopyAssignment(CXXRecordDecl *ClassDecl) {
   CopyAssignment->setDefaulted();
   CopyAssignment->setImplicit();
 
+  if (getLangOpts().CUDA) {
+    inferCUDATargetForImplicitSpecialMember(ClassDecl, CXXCopyAssignment,
+                                            CopyAssignment,
+                                            /* ConstRHS */ Const,
+                                            /* Diagnose */ false);
+  }
+
   // Build an exception specification pointing back at this member.
   FunctionProtoType::ExtProtoInfo EPI =
       getImplicitMethodEPI(*this, CopyAssignment);
@@ -9540,20 +10203,21 @@ CXXMethodDecl *Sema::DeclareImplicitCopyAssignment(CXXRecordDecl *ClassDecl) {
                                                nullptr);
   CopyAssignment->setParams(FromParam);
 
-  AddOverriddenMethods(ClassDecl, CopyAssignment);
-
   CopyAssignment->setTrivial(
     ClassDecl->needsOverloadResolutionForCopyAssignment()
       ? SpecialMemberIsTrivial(CopyAssignment, CXXCopyAssignment)
       : ClassDecl->hasTrivialCopyAssignment());
 
-  if (ShouldDeleteSpecialMember(CopyAssignment, CXXCopyAssignment))
-    SetDeclDeleted(CopyAssignment, ClassLoc);
-
   // Note that we have added this copy-assignment operator.
   ++ASTContext::NumImplicitCopyAssignmentOperatorsDeclared;
 
-  if (Scope *S = getScopeForContext(ClassDecl))
+  Scope *S = getScopeForContext(ClassDecl);
+  CheckImplicitSpecialMemberDeclaration(S, CopyAssignment);
+
+  if (ShouldDeleteSpecialMember(CopyAssignment, CXXCopyAssignment))
+    SetDeclDeleted(CopyAssignment, ClassLoc);
+
+  if (S)
     PushOnScopeChains(CopyAssignment, S, false);
   ClassDecl->addDecl(CopyAssignment);
 
@@ -9714,7 +10378,9 @@ void Sema::DefineImplicitCopyAssignment(SourceLocation CurrentLocation,
   
   // Assign non-static members.
   for (auto *Field : ClassDecl->fields()) {
-    if (Field->isUnnamedBitfield())
+    // FIXME: We should form some kind of AST representation for the implied
+    // memcpy in a union copy operation.
+    if (Field->isUnnamedBitfield() || Field->getParent()->isUnion())
       continue;
 
     if (Field->isInvalidDecl()) {
@@ -9800,6 +10466,11 @@ void Sema::DefineImplicitCopyAssignment(SourceLocation CurrentLocation,
       }
     }
   }
+
+  // The exception specification is needed because we are defining the
+  // function.
+  ResolveExceptionSpec(CurrentLocation,
+                       CopyAssignOperator->getType()->castAs<FunctionProtoType>());
 
   if (Invalid) {
     CopyAssignOperator->setInvalidDecl();
@@ -9904,6 +10575,13 @@ CXXMethodDecl *Sema::DeclareImplicitMoveAssignment(CXXRecordDecl *ClassDecl) {
   MoveAssignment->setDefaulted();
   MoveAssignment->setImplicit();
 
+  if (getLangOpts().CUDA) {
+    inferCUDATargetForImplicitSpecialMember(ClassDecl, CXXMoveAssignment,
+                                            MoveAssignment,
+                                            /* ConstRHS */ false,
+                                            /* Diagnose */ false);
+  }
+
   // Build an exception specification pointing back at this member.
   FunctionProtoType::ExtProtoInfo EPI =
       getImplicitMethodEPI(*this, MoveAssignment);
@@ -9917,22 +10595,23 @@ CXXMethodDecl *Sema::DeclareImplicitMoveAssignment(CXXRecordDecl *ClassDecl) {
                                                nullptr);
   MoveAssignment->setParams(FromParam);
 
-  AddOverriddenMethods(ClassDecl, MoveAssignment);
-
   MoveAssignment->setTrivial(
     ClassDecl->needsOverloadResolutionForMoveAssignment()
       ? SpecialMemberIsTrivial(MoveAssignment, CXXMoveAssignment)
       : ClassDecl->hasTrivialMoveAssignment());
+
+  // Note that we have added this copy-assignment operator.
+  ++ASTContext::NumImplicitMoveAssignmentOperatorsDeclared;
+
+  Scope *S = getScopeForContext(ClassDecl);
+  CheckImplicitSpecialMemberDeclaration(S, MoveAssignment);
 
   if (ShouldDeleteSpecialMember(MoveAssignment, CXXMoveAssignment)) {
     ClassDecl->setImplicitMoveAssignmentIsDeleted();
     SetDeclDeleted(MoveAssignment, ClassLoc);
   }
 
-  // Note that we have added this copy-assignment operator.
-  ++ASTContext::NumImplicitMoveAssignmentOperatorsDeclared;
-
-  if (Scope *S = getScopeForContext(ClassDecl))
+  if (S)
     PushOnScopeChains(MoveAssignment, S, false);
   ClassDecl->addDecl(MoveAssignment);
 
@@ -10132,7 +10811,9 @@ void Sema::DefineImplicitMoveAssignment(SourceLocation CurrentLocation,
 
   // Assign non-static members.
   for (auto *Field : ClassDecl->fields()) {
-    if (Field->isUnnamedBitfield())
+    // FIXME: We should form some kind of AST representation for the implied
+    // memcpy in a union copy operation.
+    if (Field->isUnnamedBitfield() || Field->getParent()->isUnion())
       continue;
 
     if (Field->isInvalidDecl()) {
@@ -10222,6 +10903,11 @@ void Sema::DefineImplicitMoveAssignment(SourceLocation CurrentLocation,
       }
     }
   }
+
+  // The exception specification is needed because we are defining the
+  // function.
+  ResolveExceptionSpec(CurrentLocation,
+                       MoveAssignOperator->getType()->castAs<FunctionProtoType>());
 
   if (Invalid) {
     MoveAssignOperator->setInvalidDecl();
@@ -10325,6 +11011,13 @@ CXXConstructorDecl *Sema::DeclareImplicitCopyConstructor(
   CopyConstructor->setAccess(AS_public);
   CopyConstructor->setDefaulted();
 
+  if (getLangOpts().CUDA) {
+    inferCUDATargetForImplicitSpecialMember(ClassDecl, CXXCopyConstructor,
+                                            CopyConstructor,
+                                            /* ConstRHS */ Const,
+                                            /* Diagnose */ false);
+  }
+
   // Build an exception specification pointing back at this member.
   FunctionProtoType::ExtProtoInfo EPI =
       getImplicitMethodEPI(*this, CopyConstructor);
@@ -10344,13 +11037,16 @@ CXXConstructorDecl *Sema::DeclareImplicitCopyConstructor(
       ? SpecialMemberIsTrivial(CopyConstructor, CXXCopyConstructor)
       : ClassDecl->hasTrivialCopyConstructor());
 
-  if (ShouldDeleteSpecialMember(CopyConstructor, CXXCopyConstructor))
-    SetDeclDeleted(CopyConstructor, ClassLoc);
-
   // Note that we have declared this constructor.
   ++ASTContext::NumImplicitCopyConstructorsDeclared;
 
-  if (Scope *S = getScopeForContext(ClassDecl))
+  Scope *S = getScopeForContext(ClassDecl);
+  CheckImplicitSpecialMemberDeclaration(S, CopyConstructor);
+
+  if (ShouldDeleteSpecialMember(CopyConstructor, CXXCopyConstructor))
+    SetDeclDeleted(CopyConstructor, ClassLoc);
+
+  if (S)
     PushOnScopeChains(CopyConstructor, S, false);
   ClassDecl->addDecl(CopyConstructor);
 
@@ -10391,6 +11087,11 @@ void Sema::DefineImplicitCopyConstructor(SourceLocation CurrentLocation,
     CopyConstructor->setBody(
         ActOnCompoundStmt(Loc, Loc, None, /*isStmtExpr=*/false).getAs<Stmt>());
   }
+
+  // The exception specification is needed because we are defining the
+  // function.
+  ResolveExceptionSpec(CurrentLocation,
+                       CopyConstructor->getType()->castAs<FunctionProtoType>());
 
   CopyConstructor->markUsed(Context);
   MarkVTableUsed(CurrentLocation, ClassDecl);
@@ -10490,6 +11191,13 @@ CXXConstructorDecl *Sema::DeclareImplicitMoveConstructor(
   MoveConstructor->setAccess(AS_public);
   MoveConstructor->setDefaulted();
 
+  if (getLangOpts().CUDA) {
+    inferCUDATargetForImplicitSpecialMember(ClassDecl, CXXMoveConstructor,
+                                            MoveConstructor,
+                                            /* ConstRHS */ false,
+                                            /* Diagnose */ false);
+  }
+
   // Build an exception specification pointing back at this member.
   FunctionProtoType::ExtProtoInfo EPI =
       getImplicitMethodEPI(*this, MoveConstructor);
@@ -10509,15 +11217,18 @@ CXXConstructorDecl *Sema::DeclareImplicitMoveConstructor(
       ? SpecialMemberIsTrivial(MoveConstructor, CXXMoveConstructor)
       : ClassDecl->hasTrivialMoveConstructor());
 
+  // Note that we have declared this constructor.
+  ++ASTContext::NumImplicitMoveConstructorsDeclared;
+
+  Scope *S = getScopeForContext(ClassDecl);
+  CheckImplicitSpecialMemberDeclaration(S, MoveConstructor);
+
   if (ShouldDeleteSpecialMember(MoveConstructor, CXXMoveConstructor)) {
     ClassDecl->setImplicitMoveConstructorIsDeleted();
     SetDeclDeleted(MoveConstructor, ClassLoc);
   }
 
-  // Note that we have declared this constructor.
-  ++ASTContext::NumImplicitMoveConstructorsDeclared;
-
-  if (Scope *S = getScopeForContext(ClassDecl))
+  if (S)
     PushOnScopeChains(MoveConstructor, S, false);
   ClassDecl->addDecl(MoveConstructor);
 
@@ -10551,6 +11262,11 @@ void Sema::DefineImplicitMoveConstructor(SourceLocation CurrentLocation,
     MoveConstructor->setBody(ActOnCompoundStmt(
         Loc, Loc, None, /*isStmtExpr=*/ false).getAs<Stmt>());
   }
+
+  // The exception specification is needed because we are defining the
+  // function.
+  ResolveExceptionSpec(CurrentLocation,
+                       MoveConstructor->getType()->castAs<FunctionProtoType>());
 
   MoveConstructor->markUsed(Context);
   MarkVTableUsed(CurrentLocation, ClassDecl);
@@ -10717,6 +11433,7 @@ static bool hasOneRealArgument(MultiExprArg Args) {
 
 ExprResult
 Sema::BuildCXXConstructExpr(SourceLocation ConstructLoc, QualType DeclInitType,
+                            NamedDecl *FoundDecl,
                             CXXConstructorDecl *Constructor,
                             MultiExprArg ExprArgs,
                             bool HadMultipleCandidates,
@@ -10737,24 +11454,26 @@ Sema::BuildCXXConstructExpr(SourceLocation ConstructLoc, QualType DeclInitType,
   //       with the same cv-unqualified type, the copy/move operation
   //       can be omitted by constructing the temporary object
   //       directly into the target of the omitted copy/move
-  if (ConstructKind == CXXConstructExpr::CK_Complete &&
+  if (ConstructKind == CXXConstructExpr::CK_Complete && Constructor &&
       Constructor->isCopyOrMoveConstructor() && hasOneRealArgument(ExprArgs)) {
     Expr *SubExpr = ExprArgs[0];
-    Elidable = SubExpr->isTemporaryObject(Context, Constructor->getParent());
+    Elidable = SubExpr->isTemporaryObject(
+        Context, cast<CXXRecordDecl>(FoundDecl->getDeclContext()));
   }
 
-  return BuildCXXConstructExpr(ConstructLoc, DeclInitType, Constructor,
+  return BuildCXXConstructExpr(ConstructLoc, DeclInitType,
+                               FoundDecl, Constructor,
                                Elidable, ExprArgs, HadMultipleCandidates,
                                IsListInitialization,
                                IsStdInitListInitialization, RequiresZeroInit,
                                ConstructKind, ParenRange);
 }
 
-/// BuildCXXConstructExpr - Creates a complete call to a constructor,
-/// including handling of its default argument expressions.
 ExprResult
 Sema::BuildCXXConstructExpr(SourceLocation ConstructLoc, QualType DeclInitType,
-                            CXXConstructorDecl *Constructor, bool Elidable,
+                            NamedDecl *FoundDecl,
+                            CXXConstructorDecl *Constructor,
+                            bool Elidable,
                             MultiExprArg ExprArgs,
                             bool HadMultipleCandidates,
                             bool IsListInitialization,
@@ -10762,13 +11481,104 @@ Sema::BuildCXXConstructExpr(SourceLocation ConstructLoc, QualType DeclInitType,
                             bool RequiresZeroInit,
                             unsigned ConstructKind,
                             SourceRange ParenRange) {
-  MarkFunctionReferenced(ConstructLoc, Constructor);
-  return CXXConstructExpr::Create(
-      Context, DeclInitType, ConstructLoc, Constructor, Elidable, ExprArgs,
+  if (auto *Shadow = dyn_cast<ConstructorUsingShadowDecl>(FoundDecl)) {
+    Constructor = findInheritingConstructor(ConstructLoc, Constructor, Shadow);
+    if (DiagnoseUseOfDecl(Constructor, ConstructLoc))
+      return ExprError(); 
+  }
+
+  return BuildCXXConstructExpr(
+      ConstructLoc, DeclInitType, Constructor, Elidable, ExprArgs,
       HadMultipleCandidates, IsListInitialization, IsStdInitListInitialization,
-      RequiresZeroInit,
+      RequiresZeroInit, ConstructKind, ParenRange);
+}
+
+/// BuildCXXConstructExpr - Creates a complete call to a constructor,
+/// including handling of its default argument expressions.
+ExprResult
+Sema::BuildCXXConstructExpr(SourceLocation ConstructLoc, QualType DeclInitType,
+                            CXXConstructorDecl *Constructor,
+                            bool Elidable,
+                            MultiExprArg ExprArgs,
+                            bool HadMultipleCandidates,
+                            bool IsListInitialization,
+                            bool IsStdInitListInitialization,
+                            bool RequiresZeroInit,
+                            unsigned ConstructKind,
+                            SourceRange ParenRange) {
+  assert(declaresSameEntity(
+             Constructor->getParent(),
+             DeclInitType->getBaseElementTypeUnsafe()->getAsCXXRecordDecl()) &&
+         "given constructor for wrong type");
+  MarkFunctionReferenced(ConstructLoc, Constructor);
+
+  return CXXConstructExpr::Create(
+      Context, DeclInitType, ConstructLoc, Constructor, Elidable,
+      ExprArgs, HadMultipleCandidates, IsListInitialization,
+      IsStdInitListInitialization, RequiresZeroInit,
       static_cast<CXXConstructExpr::ConstructionKind>(ConstructKind),
       ParenRange);
+}
+
+ExprResult Sema::BuildCXXDefaultInitExpr(SourceLocation Loc, FieldDecl *Field) {
+  assert(Field->hasInClassInitializer());
+
+  // If we already have the in-class initializer nothing needs to be done.
+  if (Field->getInClassInitializer())
+    return CXXDefaultInitExpr::Create(Context, Loc, Field);
+
+  // Maybe we haven't instantiated the in-class initializer. Go check the
+  // pattern FieldDecl to see if it has one.
+  CXXRecordDecl *ParentRD = cast<CXXRecordDecl>(Field->getParent());
+
+  if (isTemplateInstantiation(ParentRD->getTemplateSpecializationKind())) {
+    CXXRecordDecl *ClassPattern = ParentRD->getTemplateInstantiationPattern();
+    DeclContext::lookup_result Lookup =
+        ClassPattern->lookup(Field->getDeclName());
+
+    // Lookup can return at most two results: the pattern for the field, or the
+    // injected class name of the parent record. No other member can have the
+    // same name as the field.
+    assert(!Lookup.empty() && Lookup.size() <= 2 &&
+           "more than two lookup results for field name");
+    FieldDecl *Pattern = dyn_cast<FieldDecl>(Lookup[0]);
+    if (!Pattern) {
+      assert(isa<CXXRecordDecl>(Lookup[0]) &&
+             "cannot have other non-field member with same name");
+      Pattern = cast<FieldDecl>(Lookup[1]);
+    }
+
+    if (InstantiateInClassInitializer(Loc, Field, Pattern,
+                                      getTemplateInstantiationArgs(Field)))
+      return ExprError();
+    return CXXDefaultInitExpr::Create(Context, Loc, Field);
+  }
+
+  // DR1351:
+  //   If the brace-or-equal-initializer of a non-static data member
+  //   invokes a defaulted default constructor of its class or of an
+  //   enclosing class in a potentially evaluated subexpression, the
+  //   program is ill-formed.
+  //
+  // This resolution is unworkable: the exception specification of the
+  // default constructor can be needed in an unevaluated context, in
+  // particular, in the operand of a noexcept-expression, and we can be
+  // unable to compute an exception specification for an enclosed class.
+  //
+  // Any attempt to resolve the exception specification of a defaulted default
+  // constructor before the initializer is lexically complete will ultimately
+  // come here at which point we can diagnose it.
+  RecordDecl *OutermostClass = ParentRD->getOuterLexicalRecordContext();
+  if (OutermostClass == ParentRD) {
+    Diag(Field->getLocEnd(), diag::err_in_class_initializer_not_yet_parsed)
+        << ParentRD << Field;
+  } else {
+    Diag(Field->getLocEnd(),
+         diag::err_in_class_initializer_not_yet_parsed_outer_class)
+        << ParentRD << OutermostClass << Field;
+  }
+
+  return ExprError();
 }
 
 void Sema::FinalizeVarWithDestructor(VarDecl *VD, const RecordType *Record) {
@@ -10840,8 +11650,7 @@ Sema::CompleteConstructorCall(CXXConstructorDecl *Constructor,
   DiagnoseSentinelCalls(Constructor, Loc, AllArgs);
 
   CheckConstructorCall(Constructor,
-                       llvm::makeArrayRef<const Expr *>(AllArgs.data(),
-                                                        AllArgs.size()),
+                       llvm::makeArrayRef(AllArgs.data(), AllArgs.size()),
                        Proto, Loc);
 
   return Invalid;
@@ -10999,7 +11808,7 @@ bool Sema::CheckOverloadedOperatorDeclaration(FunctionDecl *FnDecl) {
                   diag::err_operator_overload_static) << FnDecl->getDeclName();
   } else {
     bool ClassOrEnumParam = false;
-    for (auto Param : FnDecl->params()) {
+    for (auto Param : FnDecl->parameters()) {
       QualType ParamType = Param->getType().getNonReferenceType();
       if (ParamType->isDependentType() || ParamType->isRecordType() ||
           ParamType->isEnumeralType()) {
@@ -11021,7 +11830,7 @@ bool Sema::CheckOverloadedOperatorDeclaration(FunctionDecl *FnDecl) {
   // Only the function-call operator allows default arguments
   // (C++ [over.call]p1).
   if (Op != OO_Call) {
-    for (auto Param : FnDecl->params()) {
+    for (auto Param : FnDecl->parameters()) {
       if (Param->hasDefaultArg())
         return Diag(Param->getLocation(),
                     diag::err_operator_overload_default_arg)
@@ -11104,6 +11913,49 @@ bool Sema::CheckOverloadedOperatorDeclaration(FunctionDecl *FnDecl) {
   return false;
 }
 
+static bool
+checkLiteralOperatorTemplateParameterList(Sema &SemaRef,
+                                          FunctionTemplateDecl *TpDecl) {
+  TemplateParameterList *TemplateParams = TpDecl->getTemplateParameters();
+
+  // Must have one or two template parameters.
+  if (TemplateParams->size() == 1) {
+    NonTypeTemplateParmDecl *PmDecl =
+        dyn_cast<NonTypeTemplateParmDecl>(TemplateParams->getParam(0));
+
+    // The template parameter must be a char parameter pack.
+    if (PmDecl && PmDecl->isTemplateParameterPack() &&
+        SemaRef.Context.hasSameType(PmDecl->getType(), SemaRef.Context.CharTy))
+      return false;
+
+  } else if (TemplateParams->size() == 2) {
+    TemplateTypeParmDecl *PmType =
+        dyn_cast<TemplateTypeParmDecl>(TemplateParams->getParam(0));
+    NonTypeTemplateParmDecl *PmArgs =
+        dyn_cast<NonTypeTemplateParmDecl>(TemplateParams->getParam(1));
+
+    // The second template parameter must be a parameter pack with the
+    // first template parameter as its type.
+    if (PmType && PmArgs && !PmType->isTemplateParameterPack() &&
+        PmArgs->isTemplateParameterPack()) {
+      const TemplateTypeParmType *TArgs =
+          PmArgs->getType()->getAs<TemplateTypeParmType>();
+      if (TArgs && TArgs->getDepth() == PmType->getDepth() &&
+          TArgs->getIndex() == PmType->getIndex()) {
+        if (SemaRef.ActiveTemplateInstantiations.empty())
+          SemaRef.Diag(TpDecl->getLocation(),
+                       diag::ext_string_literal_operator_template);
+        return false;
+      }
+    }
+  }
+
+  SemaRef.Diag(TpDecl->getTemplateParameters()->getSourceRange().getBegin(),
+               diag::err_literal_operator_template)
+      << TpDecl->getTemplateParameters()->getSourceRange();
+  return true;
+}
+
 /// CheckLiteralOperatorDeclaration - Check whether the declaration
 /// of this literal operator function is well-formed. If so, returns
 /// false; otherwise, emits appropriate diagnostics and returns true.
@@ -11119,10 +11971,9 @@ bool Sema::CheckLiteralOperatorDeclaration(FunctionDecl *FnDecl) {
     return true;
   }
 
-  bool Valid = false;
-
   // This might be the definition of a literal operator template.
   FunctionTemplateDecl *TpDecl = FnDecl->getDescribedFunctionTemplate();
+
   // This might be a specialization of a literal operator template.
   if (!TpDecl)
     TpDecl = FnDecl->getPrimaryTemplate();
@@ -11131,104 +11982,120 @@ bool Sema::CheckLiteralOperatorDeclaration(FunctionDecl *FnDecl) {
   // template <class T, T...> type operator "" name() are the only valid
   // template signatures, and the only valid signatures with no parameters.
   if (TpDecl) {
-    if (FnDecl->param_size() == 0) {
-      // Must have one or two template parameters
-      TemplateParameterList *Params = TpDecl->getTemplateParameters();
-      if (Params->size() == 1) {
-        NonTypeTemplateParmDecl *PmDecl =
-          dyn_cast<NonTypeTemplateParmDecl>(Params->getParam(0));
-
-        // The template parameter must be a char parameter pack.
-        if (PmDecl && PmDecl->isTemplateParameterPack() &&
-            Context.hasSameType(PmDecl->getType(), Context.CharTy))
-          Valid = true;
-      } else if (Params->size() == 2) {
-        TemplateTypeParmDecl *PmType =
-          dyn_cast<TemplateTypeParmDecl>(Params->getParam(0));
-        NonTypeTemplateParmDecl *PmArgs =
-          dyn_cast<NonTypeTemplateParmDecl>(Params->getParam(1));
-
-        // The second template parameter must be a parameter pack with the
-        // first template parameter as its type.
-        if (PmType && PmArgs &&
-            !PmType->isTemplateParameterPack() &&
-            PmArgs->isTemplateParameterPack()) {
-          const TemplateTypeParmType *TArgs =
-            PmArgs->getType()->getAs<TemplateTypeParmType>();
-          if (TArgs && TArgs->getDepth() == PmType->getDepth() &&
-              TArgs->getIndex() == PmType->getIndex()) {
-            Valid = true;
-            if (ActiveTemplateInstantiations.empty())
-              Diag(FnDecl->getLocation(),
-                   diag::ext_string_literal_operator_template);
-          }
-        }
-      }
+    if (FnDecl->param_size() != 0) {
+      Diag(FnDecl->getLocation(),
+           diag::err_literal_operator_template_with_params);
+      return true;
     }
-  } else if (FnDecl->param_size()) {
-    // Check the first parameter
+
+    if (checkLiteralOperatorTemplateParameterList(*this, TpDecl))
+      return true;
+
+  } else if (FnDecl->param_size() == 1) {
+    const ParmVarDecl *Param = FnDecl->getParamDecl(0);
+
+    QualType ParamType = Param->getType().getUnqualifiedType();
+
+    // Only unsigned long long int, long double, any character type, and const
+    // char * are allowed as the only parameters.
+    if (ParamType->isSpecificBuiltinType(BuiltinType::ULongLong) ||
+        ParamType->isSpecificBuiltinType(BuiltinType::LongDouble) ||
+        Context.hasSameType(ParamType, Context.CharTy) ||
+        Context.hasSameType(ParamType, Context.WideCharTy) ||
+        Context.hasSameType(ParamType, Context.Char16Ty) ||
+        Context.hasSameType(ParamType, Context.Char32Ty)) {
+    } else if (const PointerType *Ptr = ParamType->getAs<PointerType>()) {
+      QualType InnerType = Ptr->getPointeeType();
+
+      // Pointer parameter must be a const char *.
+      if (!(Context.hasSameType(InnerType.getUnqualifiedType(),
+                                Context.CharTy) &&
+            InnerType.isConstQualified() && !InnerType.isVolatileQualified())) {
+        Diag(Param->getSourceRange().getBegin(),
+             diag::err_literal_operator_param)
+            << ParamType << "'const char *'" << Param->getSourceRange();
+        return true;
+      }
+
+    } else if (ParamType->isRealFloatingType()) {
+      Diag(Param->getSourceRange().getBegin(), diag::err_literal_operator_param)
+          << ParamType << Context.LongDoubleTy << Param->getSourceRange();
+      return true;
+
+    } else if (ParamType->isIntegerType()) {
+      Diag(Param->getSourceRange().getBegin(), diag::err_literal_operator_param)
+          << ParamType << Context.UnsignedLongLongTy << Param->getSourceRange();
+      return true;
+
+    } else {
+      Diag(Param->getSourceRange().getBegin(),
+           diag::err_literal_operator_invalid_param)
+          << ParamType << Param->getSourceRange();
+      return true;
+    }
+
+  } else if (FnDecl->param_size() == 2) {
     FunctionDecl::param_iterator Param = FnDecl->param_begin();
 
-    QualType T = (*Param)->getType().getUnqualifiedType();
+    // First, verify that the first parameter is correct.
 
-    // unsigned long long int, long double, and any character type are allowed
-    // as the only parameters.
-    if (Context.hasSameType(T, Context.UnsignedLongLongTy) ||
-        Context.hasSameType(T, Context.LongDoubleTy) ||
-        Context.hasSameType(T, Context.CharTy) ||
-        Context.hasSameType(T, Context.WideCharTy) ||
-        Context.hasSameType(T, Context.Char16Ty) ||
-        Context.hasSameType(T, Context.Char32Ty)) {
-      if (++Param == FnDecl->param_end())
-        Valid = true;
-      goto FinishedParams;
+    QualType FirstParamType = (*Param)->getType().getUnqualifiedType();
+
+    // Two parameter function must have a pointer to const as a
+    // first parameter; let's strip those qualifiers.
+    const PointerType *PT = FirstParamType->getAs<PointerType>();
+
+    if (!PT) {
+      Diag((*Param)->getSourceRange().getBegin(),
+           diag::err_literal_operator_param)
+          << FirstParamType << "'const char *'" << (*Param)->getSourceRange();
+      return true;
     }
 
-    // Otherwise it must be a pointer to const; let's strip those qualifiers.
-    const PointerType *PT = T->getAs<PointerType>();
-    if (!PT)
-      goto FinishedParams;
-    T = PT->getPointeeType();
-    if (!T.isConstQualified() || T.isVolatileQualified())
-      goto FinishedParams;
-    T = T.getUnqualifiedType();
+    QualType PointeeType = PT->getPointeeType();
+    // First parameter must be const
+    if (!PointeeType.isConstQualified() || PointeeType.isVolatileQualified()) {
+      Diag((*Param)->getSourceRange().getBegin(),
+           diag::err_literal_operator_param)
+          << FirstParamType << "'const char *'" << (*Param)->getSourceRange();
+      return true;
+    }
 
-    // Move on to the second parameter;
+    QualType InnerType = PointeeType.getUnqualifiedType();
+    // Only const char *, const wchar_t*, const char16_t*, and const char32_t*
+    // are allowed as the first parameter to a two-parameter function
+    if (!(Context.hasSameType(InnerType, Context.CharTy) ||
+          Context.hasSameType(InnerType, Context.WideCharTy) ||
+          Context.hasSameType(InnerType, Context.Char16Ty) ||
+          Context.hasSameType(InnerType, Context.Char32Ty))) {
+      Diag((*Param)->getSourceRange().getBegin(),
+           diag::err_literal_operator_param)
+          << FirstParamType << "'const char *'" << (*Param)->getSourceRange();
+      return true;
+    }
+
+    // Move on to the second and final parameter.
     ++Param;
 
-    // If there is no second parameter, the first must be a const char *
-    if (Param == FnDecl->param_end()) {
-      if (Context.hasSameType(T, Context.CharTy))
-        Valid = true;
-      goto FinishedParams;
+    // The second parameter must be a std::size_t.
+    QualType SecondParamType = (*Param)->getType().getUnqualifiedType();
+    if (!Context.hasSameType(SecondParamType, Context.getSizeType())) {
+      Diag((*Param)->getSourceRange().getBegin(),
+           diag::err_literal_operator_param)
+          << SecondParamType << Context.getSizeType()
+          << (*Param)->getSourceRange();
+      return true;
     }
-
-    // const char *, const wchar_t*, const char16_t*, and const char32_t*
-    // are allowed as the first parameter to a two-parameter function
-    if (!(Context.hasSameType(T, Context.CharTy) ||
-          Context.hasSameType(T, Context.WideCharTy) ||
-          Context.hasSameType(T, Context.Char16Ty) ||
-          Context.hasSameType(T, Context.Char32Ty)))
-      goto FinishedParams;
-
-    // The second and final parameter must be an std::size_t
-    T = (*Param)->getType().getUnqualifiedType();
-    if (Context.hasSameType(T, Context.getSizeType()) &&
-        ++Param == FnDecl->param_end())
-      Valid = true;
-  }
-
-  // FIXME: This diagnostic is absolutely terrible.
-FinishedParams:
-  if (!Valid) {
-    Diag(FnDecl->getLocation(), diag::err_literal_operator_params)
-      << FnDecl->getDeclName();
+  } else {
+    Diag(FnDecl->getLocation(), diag::err_literal_operator_bad_param_count);
     return true;
   }
 
+  // Parameters are good.
+
   // A parameter-declaration-clause containing a default argument is not
   // equivalent to any of the permitted forms.
-  for (auto Param : FnDecl->params()) {
+  for (auto Param : FnDecl->parameters()) {
     if (Param->hasDefaultArg()) {
       Diag(Param->getDefaultArgRange().getBegin(),
            diag::err_literal_operator_default_argument)
@@ -11342,6 +12209,11 @@ VarDecl *Sema::BuildExceptionDeclaration(Scope *S,
     Invalid = true;
   }
 
+  if (ExDeclType->isVariablyModifiedType()) {
+    Diag(Loc, diag::err_catch_variably_modified) << ExDeclType;
+    Invalid = true;
+  }
+
   QualType BaseType = ExDeclType;
   int Mode = 0; // 0 for direct type, 1 for pointer, 2 for reference
   unsigned DK = diag::err_catch_incomplete;
@@ -11404,7 +12276,7 @@ VarDecl *Sema::BuildExceptionDeclaration(Scope *S,
       //
       // We just pretend to initialize the object with itself, then make sure
       // it can be destroyed later.
-      QualType initType = ExDeclType;
+      QualType initType = Context.getExceptionObjectType(ExDeclType);
 
       InitializedEntity entity =
         InitializedEntity::InitializeVariable(ExDecl);
@@ -11582,7 +12454,7 @@ FriendDecl *Sema::CheckFriendTypeDecl(SourceLocation LocStart,
                diag::ext_unelaborated_friend_type)
           << (unsigned) RD->getTagKind()
           << T
-          << FixItHint::CreateInsertion(PP.getLocForEndOfToken(FriendLoc),
+          << FixItHint::CreateInsertion(getLocForEndOfToken(FriendLoc),
                                         InsertionText);
       } else {
         Diag(FriendLoc,
@@ -11807,10 +12679,9 @@ Decl *Sema::ActOnFriendTypeDecl(Scope *S, const DeclSpec &DS,
   // friend a member of an arbitrary specialization of your template).
 
   Decl *D;
-  if (unsigned NumTempParamLists = TempParams.size())
+  if (!TempParams.empty())
     D = FriendTemplateDecl::Create(Context, CurContext, Loc,
-                                   NumTempParamLists,
-                                   TempParams.data(),
+                                   TempParams,
                                    TSI,
                                    DS.getFriendSpecLoc());
   else
@@ -12048,15 +12919,30 @@ NamedDecl *Sema::ActOnFriendFunctionDecl(Scope *S, Declarator &D,
     DC = CurContext;
     assert(isa<CXXRecordDecl>(DC) && "friend declaration not in class?");
   }
-  
+
   if (!DC->isRecord()) {
+    int DiagArg = -1;
+    switch (D.getName().getKind()) {
+    case UnqualifiedId::IK_ConstructorTemplateId:
+    case UnqualifiedId::IK_ConstructorName:
+      DiagArg = 0;
+      break;
+    case UnqualifiedId::IK_DestructorName:
+      DiagArg = 1;
+      break;
+    case UnqualifiedId::IK_ConversionFunctionId:
+      DiagArg = 2;
+      break;
+    case UnqualifiedId::IK_Identifier:
+    case UnqualifiedId::IK_ImplicitSelfParam:
+    case UnqualifiedId::IK_LiteralOperatorId:
+    case UnqualifiedId::IK_OperatorFunctionId:
+    case UnqualifiedId::IK_TemplateId:
+      break;
+    }
     // This implies that it has to be an operator or function.
-    if (D.getName().getKind() == UnqualifiedId::IK_ConstructorName ||
-        D.getName().getKind() == UnqualifiedId::IK_DestructorName ||
-        D.getName().getKind() == UnqualifiedId::IK_ConversionFunctionId) {
-      Diag(Loc, diag::err_introducing_special_friend) <<
-        (D.getName().getKind() == UnqualifiedId::IK_ConstructorName ? 0 :
-         D.getName().getKind() == UnqualifiedId::IK_DestructorName ? 1 : 2);
+    if (DiagArg >= 0) {
+      Diag(Loc, diag::err_introducing_special_friend) << DiagArg;
       return nullptr;
     }
   }
@@ -12124,8 +13010,12 @@ NamedDecl *Sema::ActOnFriendFunctionDecl(Scope *S, Declarator &D,
     }
 
     // Mark templated-scope function declarations as unsupported.
-    if (FD->getNumTemplateParameterLists())
+    if (FD->getNumTemplateParameterLists() && SS.isValid()) {
+      Diag(FD->getLocation(), diag::warn_template_qualified_friend_unsupported)
+        << SS.getScopeRep() << SS.getRange()
+        << cast<CXXRecordDecl>(CurContext);
       FrD->setUnsupportedFriend(true);
+    }
   }
 
   return ND;
@@ -12214,57 +13104,27 @@ void Sema::SetDeclDefaulted(Decl *Dcl, SourceLocation DefaultLoc) {
     // the record is complete.
     const FunctionDecl *Primary = MD;
     if (const FunctionDecl *Pattern = MD->getTemplateInstantiationPattern())
-      // Find the uninstantiated declaration that actually had the '= default'
-      // on it.
-      Pattern->isDefined(Primary);
+      // Ask the template instantiation pattern that actually had the
+      // '= default' on it.
+      Primary = Pattern;
 
     // If the method was defaulted on its first declaration, we will have
     // already performed the checking in CheckCompletedCXXClass. Such a
     // declaration doesn't trigger an implicit definition.
-    if (Primary == Primary->getCanonicalDecl())
+    if (Primary->getCanonicalDecl()->isDefaulted())
       return;
 
     CheckExplicitlyDefaultedSpecialMember(MD);
 
-    // The exception specification is needed because we are defining the
-    // function.
-    ResolveExceptionSpec(DefaultLoc,
-                         MD->getType()->castAs<FunctionProtoType>());
-
-    if (MD->isInvalidDecl())
-      return;
-
-    switch (Member) {
-    case CXXDefaultConstructor:
-      DefineImplicitDefaultConstructor(DefaultLoc,
-                                       cast<CXXConstructorDecl>(MD));
-      break;
-    case CXXCopyConstructor:
-      DefineImplicitCopyConstructor(DefaultLoc, cast<CXXConstructorDecl>(MD));
-      break;
-    case CXXCopyAssignment:
-      DefineImplicitCopyAssignment(DefaultLoc, MD);
-      break;
-    case CXXDestructor:
-      DefineImplicitDestructor(DefaultLoc, cast<CXXDestructorDecl>(MD));
-      break;
-    case CXXMoveConstructor:
-      DefineImplicitMoveConstructor(DefaultLoc, cast<CXXConstructorDecl>(MD));
-      break;
-    case CXXMoveAssignment:
-      DefineImplicitMoveAssignment(DefaultLoc, MD);
-      break;
-    case CXXInvalid:
-      llvm_unreachable("Invalid special member.");
-    }
+    if (!MD->isInvalidDecl())
+      DefineImplicitSpecialMember(*this, MD, DefaultLoc);
   } else {
     Diag(DefaultLoc, diag::err_default_special_members);
   }
 }
 
 static void SearchForReturnInStmt(Sema &Self, Stmt *S) {
-  for (Stmt::child_range CI = S->children(); CI; ++CI) {
-    Stmt *SubStmt = *CI;
+  for (Stmt *SubStmt : S->children()) {
     if (!SubStmt)
       continue;
     if (isa<ReturnStmt>(SubStmt))
@@ -12346,21 +13206,22 @@ bool Sema::CheckOverridingFunctionReturnType(const CXXMethodDecl *New,
     return true;
   }
 
-  // C++ [class.virtual]p6:
-  //   If the return type of D::f differs from the return type of B::f, the 
-  //   class type in the return type of D::f shall be complete at the point of
-  //   declaration of D::f or shall be the class type D.
-  if (const RecordType *RT = NewClassTy->getAs<RecordType>()) {
-    if (!RT->isBeingDefined() &&
-        RequireCompleteType(New->getLocation(), NewClassTy, 
-                            diag::err_covariant_return_incomplete,
-                            New->getDeclName()))
-    return true;
-  }
-
   if (!Context.hasSameUnqualifiedType(NewClassTy, OldClassTy)) {
+    // C++14 [class.virtual]p8:
+    //   If the class type in the covariant return type of D::f differs from
+    //   that of B::f, the class type in the return type of D::f shall be
+    //   complete at the point of declaration of D::f or shall be the class
+    //   type D.
+    if (const RecordType *RT = NewClassTy->getAs<RecordType>()) {
+      if (!RT->isBeingDefined() &&
+          RequireCompleteType(New->getLocation(), NewClassTy,
+                              diag::err_covariant_return_incomplete,
+                              New->getDeclName()))
+        return true;
+    }
+
     // Check if the new class derives from the old class.
-    if (!IsDerivedFrom(NewClassTy, OldClassTy)) {
+    if (!IsDerivedFrom(New->getLocation(), NewClassTy, OldClassTy)) {
       Diag(New->getLocation(), diag::err_covariant_return_not_derived)
           << New->getDeclName() << NewTy << OldTy
           << New->getReturnTypeSourceRange();
@@ -12395,7 +13256,7 @@ bool Sema::CheckOverridingFunctionReturnType(const CXXMethodDecl *New,
     Diag(Old->getLocation(), diag::note_overridden_virtual_function)
         << Old->getReturnTypeSourceRange();
     return true;
-  };
+  }
 
 
   // The new class type must have the same or less qualifiers as the old type.
@@ -12407,7 +13268,7 @@ bool Sema::CheckOverridingFunctionReturnType(const CXXMethodDecl *New,
     Diag(Old->getLocation(), diag::note_overridden_virtual_function)
         << Old->getReturnTypeSourceRange();
     return true;
-  };
+  }
 
   return false;
 }
@@ -12431,6 +13292,15 @@ bool Sema::CheckPureMethod(CXXMethodDecl *Method, SourceRange InitRange) {
     Diag(Method->getLocation(), diag::err_non_virtual_pure)
       << Method->getDeclName() << InitRange;
   return true;
+}
+
+void Sema::ActOnPureSpecifier(Decl *D, SourceLocation ZeroLoc) {
+  if (D->getFriendObjectKind())
+    Diag(D->getLocation(), diag::err_pure_friend);
+  else if (auto *M = dyn_cast<CXXMethodDecl>(D))
+    CheckPureMethod(M, ZeroLoc);
+  else
+    Diag(D->getLocation(), diag::err_illegal_initializer);
 }
 
 /// \brief Determine whether the given declaration is a static data member.
@@ -12544,7 +13414,7 @@ void Sema::MarkVTableUsed(SourceLocation Loc, CXXRecordDecl *Class,
     Pos = VTablesUsed.insert(std::make_pair(Class, DefinitionRequired));
   if (!Pos.second) {
     // If we already had an entry, check to see if we are promoting this vtable
-    // to required a definition. If so, we need to reappend to the VTableUses
+    // to require a definition. If so, we need to reappend to the VTableUses
     // list, since we may have already processed the first entry.
     if (DefinitionRequired && !Pos.first->second) {
       Pos.first->second = true;
@@ -12557,14 +13427,19 @@ void Sema::MarkVTableUsed(SourceLocation Loc, CXXRecordDecl *Class,
     // checks (i.e. operator delete() lookup) when the vtable is marked used, as
     // the deleting destructor is emitted with the vtable, not with the
     // destructor definition as in the Itanium ABI.
-    // If it has a definition, we do the check at that point instead.
-    if (Context.getTargetInfo().getCXXABI().isMicrosoft() &&
-        Class->hasUserDeclaredDestructor() &&
-        !Class->getDestructor()->isDefined() &&
-        !Class->getDestructor()->isDeleted()) {
+    if (Context.getTargetInfo().getCXXABI().isMicrosoft()) {
       CXXDestructorDecl *DD = Class->getDestructor();
-      ContextRAII SavedContext(*this, DD);
-      CheckDestructor(DD);
+      if (DD && DD->isVirtual() && !DD->isDeleted()) {
+        if (Class->hasUserDeclaredDestructor() && !DD->isDefined()) {
+          // If this is an out-of-line declaration, marking it referenced will
+          // not do anything. Manually call CheckDestructor to look up operator
+          // delete().
+          ContextRAII SavedContext(*this, DD);
+          CheckDestructor(DD);
+        } else {
+          MarkFunctionReferenced(Loc, Class->getDestructor());
+        }
+      }
     }
   }
 
@@ -12646,7 +13521,8 @@ bool Sema::DefineUsedVTables() {
     DefinedAnything = true;
     MarkVirtualMembersReferenced(Loc, Class);
     CXXRecordDecl *Canonical = cast<CXXRecordDecl>(Class->getCanonicalDecl());
-    Consumer.HandleVTable(Class, VTablesUsed[Canonical]);
+    if (VTablesUsed[Canonical])
+      Consumer.HandleVTable(Class);
 
     // Optionally warn if we're emitting a weak vtable.
     if (Class->isExternallyVisible() &&
@@ -12745,10 +13621,10 @@ void Sema::SetIvarInitializers(ObjCImplementationDecl *ObjCImplementation) {
       AllToInit.push_back(Member);
       
       // Be sure that the destructor is accessible and is marked as referenced.
-      if (const RecordType *RecordTy
-                  = Context.getBaseElementType(Field->getType())
-                                                        ->getAs<RecordType>()) {
-                    CXXRecordDecl *RD = cast<CXXRecordDecl>(RecordTy->getDecl());
+      if (const RecordType *RecordTy =
+              Context.getBaseElementType(Field->getType())
+                  ->getAs<RecordType>()) {
+        CXXRecordDecl *RD = cast<CXXRecordDecl>(RecordTy->getDecl());
         if (CXXDestructorDecl *Destructor = LookupDestructor(RD)) {
           MarkFunctionReferenced(Field->getLocation(), Destructor);
           CheckDestructorAccess(Field->getLocation(), Destructor,
@@ -12786,7 +13662,7 @@ void DelegatingCycleHelper(CXXConstructorDecl* Ctor,
                      // Avoid dereferencing a null pointer here.
                      *TCanonical = Target? Target->getCanonicalDecl() : nullptr;
 
-  if (!Current.insert(Canonical))
+  if (!Current.insert(Canonical).second)
     return;
 
   // We know that beyond here, we aren't chaining into a cycle.
@@ -12904,6 +13780,7 @@ bool Sema::checkThisInStaticMemberFunctionExceptionSpec(CXXMethodDecl *Method) {
   FindCXXThisExpr Finder(*this);
 
   switch (Proto->getExceptionSpecType()) {
+  case EST_Unparsed:
   case EST_Uninstantiated:
   case EST_Unevaluated:
   case EST_BasicNoexcept:
@@ -12940,27 +13817,27 @@ bool Sema::checkThisInStaticMemberFunctionAttributes(CXXMethodDecl *Method) {
     else if (const auto *G = dyn_cast<PtGuardedByAttr>(A))
       Arg = G->getArg();
     else if (const auto *AA = dyn_cast<AcquiredAfterAttr>(A))
-      Args = ArrayRef<Expr *>(AA->args_begin(), AA->args_size());
+      Args = llvm::makeArrayRef(AA->args_begin(), AA->args_size());
     else if (const auto *AB = dyn_cast<AcquiredBeforeAttr>(A))
-      Args = ArrayRef<Expr *>(AB->args_begin(), AB->args_size());
+      Args = llvm::makeArrayRef(AB->args_begin(), AB->args_size());
     else if (const auto *ETLF = dyn_cast<ExclusiveTrylockFunctionAttr>(A)) {
       Arg = ETLF->getSuccessValue();
-      Args = ArrayRef<Expr *>(ETLF->args_begin(), ETLF->args_size());
+      Args = llvm::makeArrayRef(ETLF->args_begin(), ETLF->args_size());
     } else if (const auto *STLF = dyn_cast<SharedTrylockFunctionAttr>(A)) {
       Arg = STLF->getSuccessValue();
-      Args = ArrayRef<Expr *>(STLF->args_begin(), STLF->args_size());
+      Args = llvm::makeArrayRef(STLF->args_begin(), STLF->args_size());
     } else if (const auto *LR = dyn_cast<LockReturnedAttr>(A))
       Arg = LR->getArg();
     else if (const auto *LE = dyn_cast<LocksExcludedAttr>(A))
-      Args = ArrayRef<Expr *>(LE->args_begin(), LE->args_size());
+      Args = llvm::makeArrayRef(LE->args_begin(), LE->args_size());
     else if (const auto *RC = dyn_cast<RequiresCapabilityAttr>(A))
-      Args = ArrayRef<Expr *>(RC->args_begin(), RC->args_size());
+      Args = llvm::makeArrayRef(RC->args_begin(), RC->args_size());
     else if (const auto *AC = dyn_cast<AcquireCapabilityAttr>(A))
-      Args = ArrayRef<Expr *>(AC->args_begin(), AC->args_size());
+      Args = llvm::makeArrayRef(AC->args_begin(), AC->args_size());
     else if (const auto *AC = dyn_cast<TryAcquireCapabilityAttr>(A))
-      Args = ArrayRef<Expr *>(AC->args_begin(), AC->args_size());
+      Args = llvm::makeArrayRef(AC->args_begin(), AC->args_size());
     else if (const auto *RC = dyn_cast<ReleaseCapabilityAttr>(A))
-      Args = ArrayRef<Expr *>(RC->args_begin(), RC->args_size());
+      Args = llvm::makeArrayRef(RC->args_begin(), RC->args_size());
 
     if (Arg && !Finder.TraverseStmt(Arg))
       return true;
@@ -12974,13 +13851,12 @@ bool Sema::checkThisInStaticMemberFunctionAttributes(CXXMethodDecl *Method) {
   return false;
 }
 
-void
-Sema::checkExceptionSpecification(ExceptionSpecificationType EST,
-                                  ArrayRef<ParsedType> DynamicExceptions,
-                                  ArrayRef<SourceRange> DynamicExceptionRanges,
-                                  Expr *NoexceptExpr,
-                                  SmallVectorImpl<QualType> &Exceptions,
-                                  FunctionProtoType::ExceptionSpecInfo &ESI) {
+void Sema::checkExceptionSpecification(
+    bool IsTopLevel, ExceptionSpecificationType EST,
+    ArrayRef<ParsedType> DynamicExceptions,
+    ArrayRef<SourceRange> DynamicExceptionRanges, Expr *NoexceptExpr,
+    SmallVectorImpl<QualType> &Exceptions,
+    FunctionProtoType::ExceptionSpecInfo &ESI) {
   Exceptions.clear();
   ESI.Type = EST;
   if (EST == EST_Dynamic) {
@@ -12989,13 +13865,15 @@ Sema::checkExceptionSpecification(ExceptionSpecificationType EST,
       // FIXME: Preserve type source info.
       QualType ET = GetTypeFromParser(DynamicExceptions[ei]);
 
-      SmallVector<UnexpandedParameterPack, 2> Unexpanded;
-      collectUnexpandedParameterPacks(ET, Unexpanded);
-      if (!Unexpanded.empty()) {
-        DiagnoseUnexpandedParameterPacks(DynamicExceptionRanges[ei].getBegin(),
-                                         UPPC_ExceptionType,
-                                         Unexpanded);
-        continue;
+      if (IsTopLevel) {
+        SmallVector<UnexpandedParameterPack, 2> Unexpanded;
+        collectUnexpandedParameterPacks(ET, Unexpanded);
+        if (!Unexpanded.empty()) {
+          DiagnoseUnexpandedParameterPacks(
+              DynamicExceptionRanges[ei].getBegin(), UPPC_ExceptionType,
+              Unexpanded);
+          continue;
+        }
       }
 
       // Check that the type is valid for an exception spec, and
@@ -13014,7 +13892,8 @@ Sema::checkExceptionSpecification(ExceptionSpecificationType EST,
               NoexceptExpr->getType()->getCanonicalTypeUnqualified() ==
               Context.BoolTy) &&
              "Parser should have made sure that the expression is boolean");
-      if (NoexceptExpr && DiagnoseUnexpandedParameterPack(NoexceptExpr)) {
+      if (IsTopLevel && NoexceptExpr &&
+          DiagnoseUnexpandedParameterPack(NoexceptExpr)) {
         ESI.Type = EST_BasicNoexcept;
         return;
       }
@@ -13029,44 +13908,43 @@ Sema::checkExceptionSpecification(ExceptionSpecificationType EST,
   }
 }
 
-/// IdentifyCUDATarget - Determine the CUDA compilation target for this function
-Sema::CUDAFunctionTarget Sema::IdentifyCUDATarget(const FunctionDecl *D) {
-  // Implicitly declared functions (e.g. copy constructors) are
-  // __host__ __device__
-  if (D->isImplicit())
-    return CFT_HostDevice;
+void Sema::actOnDelayedExceptionSpecification(Decl *MethodD,
+             ExceptionSpecificationType EST,
+             SourceRange SpecificationRange,
+             ArrayRef<ParsedType> DynamicExceptions,
+             ArrayRef<SourceRange> DynamicExceptionRanges,
+             Expr *NoexceptExpr) {
+  if (!MethodD)
+    return;
 
-  if (D->hasAttr<CUDAGlobalAttr>())
-    return CFT_Global;
+  // Dig out the method we're referring to.
+  if (FunctionTemplateDecl *FunTmpl = dyn_cast<FunctionTemplateDecl>(MethodD))
+    MethodD = FunTmpl->getTemplatedDecl();
 
-  if (D->hasAttr<CUDADeviceAttr>()) {
-    if (D->hasAttr<CUDAHostAttr>())
-      return CFT_HostDevice;
-    return CFT_Device;
+  CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(MethodD);
+  if (!Method)
+    return;
+
+  // Check the exception specification.
+  llvm::SmallVector<QualType, 4> Exceptions;
+  FunctionProtoType::ExceptionSpecInfo ESI;
+  checkExceptionSpecification(/*IsTopLevel*/true, EST, DynamicExceptions,
+                              DynamicExceptionRanges, NoexceptExpr, Exceptions,
+                              ESI);
+
+  // Update the exception specification on the function type.
+  Context.adjustExceptionSpec(Method, ESI, /*AsWritten*/true);
+
+  if (Method->isStatic())
+    checkThisInStaticMemberFunctionExceptionSpec(Method);
+
+  if (Method->isVirtual()) {
+    // Check overrides, which we previously had to delay.
+    for (CXXMethodDecl::method_iterator O = Method->begin_overridden_methods(),
+                                     OEnd = Method->end_overridden_methods();
+         O != OEnd; ++O)
+      CheckOverridingFunctionExceptionSpec(Method, *O);
   }
-
-  return CFT_Host;
-}
-
-bool Sema::CheckCUDATarget(CUDAFunctionTarget CallerTarget,
-                           CUDAFunctionTarget CalleeTarget) {
-  // CUDA B.1.1 "The __device__ qualifier declares a function that is...
-  // Callable from the device only."
-  if (CallerTarget == CFT_Host && CalleeTarget == CFT_Device)
-    return true;
-
-  // CUDA B.1.2 "The __global__ qualifier declares a function that is...
-  // Callable from the host only."
-  // CUDA B.1.3 "The __host__ qualifier declares a function that is...
-  // Callable from the host only."
-  if ((CallerTarget == CFT_Device || CallerTarget == CFT_Global) &&
-      (CalleeTarget == CFT_Host || CalleeTarget == CFT_Global))
-    return true;
-
-  if (CallerTarget == CFT_HostDevice && CalleeTarget != CFT_HostDevice)
-    return true;
-
-  return false;
 }
 
 /// HandleMSProperty - Analyze a __delcspec(property) field of a C++ class.
@@ -13099,6 +13977,9 @@ MSPropertyDecl *Sema::HandleMSProperty(Scope *S, RecordDecl *Record,
 
   DiagnoseFunctionSpecifiers(D.getDeclSpec());
 
+  if (D.getDeclSpec().isInlineSpecified())
+    Diag(D.getDeclSpec().getInlineSpecLoc(), diag::err_inline_non_function)
+        << getLangOpts().CPlusPlus1z;
   if (DeclSpec::TSCS TSCS = D.getDeclSpec().getThreadStorageClassSpec())
     Diag(D.getDeclSpec().getThreadStorageClassSpecLoc(),
          diag::err_invalid_thread)

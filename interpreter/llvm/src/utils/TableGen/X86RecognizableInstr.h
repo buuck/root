@@ -14,12 +14,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef X86RECOGNIZABLEINSTR_H
-#define X86RECOGNIZABLEINSTR_H
+#ifndef LLVM_UTILS_TABLEGEN_X86RECOGNIZABLEINSTR_H
+#define LLVM_UTILS_TABLEGEN_X86RECOGNIZABLEINSTR_H
 
 #include "CodeGenTarget.h"
 #include "X86DisassemblerTables.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/TableGen/Record.h"
 
@@ -50,8 +49,8 @@ private:
   uint8_t Encoding;
   /// The OpSize field from the record
   uint8_t OpSize;
-  /// The hasAdSizePrefix field from the record
-  bool HasAdSizePrefix;
+  /// The AdSize field from the record
+  uint8_t AdSize;
   /// The hasREX_WPrefix field from the record
   bool HasREX_WPrefix;
   /// The hasVEX_4V field from the record
@@ -87,8 +86,6 @@ private:
 
   /// The instruction name as listed in the tables
   std::string Name;
-  /// The AT&T AsmString for the instruction
-  std::string AsmString;
 
   /// Indicates whether the instruction should be emitted into the decode
   /// tables; regardless, it will be emitted into the instruction info table
@@ -179,7 +176,7 @@ private:
   void handleOperand(bool optional,
                      unsigned &operandIndex,
                      unsigned &physicalOperandIndex,
-                     unsigned &numPhysicalOperands,
+                     unsigned numPhysicalOperands,
                      const unsigned *operandMapping,
                      OperandEncoding (*encodingFromString)
                        (const std::string&,

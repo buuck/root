@@ -25,15 +25,9 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TDirectory
 #include "TDirectory.h"
-#endif
-#ifndef ROOT_TList
 #include "TList.h"
-#endif
-#ifndef ROOT_RConfigure
 #include "RConfigure.h"
-#endif
 
 #include <atomic>
 
@@ -65,14 +59,48 @@ class TGlobalMappedFunction;
 R__EXTERN TVirtualMutex *gROOTMutex;
 
 namespace ROOT {
+namespace Internal {
    class TROOTAllocator;
+
    TROOT *GetROOT2();
+
+   // Manage parallel branch processing
+   void EnableParBranchProcessing();
+   void DisableParBranchProcessing();
+   Bool_t IsParBranchProcessingEnabled();
+   class TParBranchProcessingRAII {
+   public:
+      TParBranchProcessingRAII()  { EnableParBranchProcessing();  }
+      ~TParBranchProcessingRAII() { DisableParBranchProcessing(); }
+   };
+      
+   // Manage parallel tree processing
+   void EnableParTreeProcessing();
+   void DisableParTreeProcessing();
+   Bool_t IsParTreeProcessingEnabled();
+   class TParTreeProcessingRAII {
+   public:
+      TParTreeProcessingRAII()  { EnableParTreeProcessing();  }
+      ~TParTreeProcessingRAII() { DisableParTreeProcessing(); }
+   };
+} } // End ROOT::Internal
+
+namespace ROOT {
+   // Enable support for multi-threading within the ROOT code,
+   // in particular, enables the global mutex to make ROOT thread safe/aware.
+   void EnableThreadSafety();
+   /// \brief Enable ROOT's implicit multi-threading for all objects and methods that provide an internal
+   /// parallelisation mechanism.
+   void EnableImplicitMT(UInt_t numthreads = 0);
+   void DisableImplicitMT();
+   Bool_t IsImplicitMTEnabled();
+   UInt_t GetImplicitMTPoolSize();
 }
 
 class TROOT : public TDirectory {
 
 friend class TCling;
-friend TROOT *ROOT::GetROOT2();
+friend TROOT *ROOT::Internal::GetROOT2();
 
 private:
    Int_t           fLineIsProcessing;     //To synchronize multi-threads
@@ -85,6 +113,8 @@ private:
    TROOT& operator=(const TROOT&);        //Not implemented
 
 protected:
+   typedef std::atomic<TListOfEnums*> AListOfEnums_t;
+
    TString         fConfigOptions;        //ROOT ./configure set build options
    TString         fConfigFeatures;       //ROOT ./configure detected build features
    TString         fVersion;              //ROOT version (from CMZ VERSQQ) ex 0.05/01
@@ -98,7 +128,7 @@ protected:
    TString         fGitBranch;            //Git branch
    TString         fGitDate;              //Date and time when make was run
    Int_t           fTimer;                //Timer flag
-   std::atomic<TApplication*> fApplication;         //Pointer to current application
+   std::atomic<TApplication*> fApplication;  //Pointer to current application
    TInterpreter    *fInterpreter;         //Command interpreter
    Bool_t          fBatch;                //True if session without graphics
    Bool_t          fEditHistograms;       //True if histograms can be edited with the mouse
@@ -137,7 +167,7 @@ protected:
    TSeqCollection  *fProofs;              //List of proof sessions
    TSeqCollection  *fClipboard;           //List of clipbard objects
    TSeqCollection  *fDataSets;            //List of data sets (TDSet or TChain)
-   TCollection     *fEnums;               //List of enum types
+   AListOfEnums_t   fEnums;               //List of enum types
    TProcessUUID    *fUUIDs;               //Pointer to TProcessID managing TUUIDs
    TFolder         *fRootFolder;          //top level folder //root
    TList           *fBrowsables;          //List of browsables
@@ -153,7 +183,7 @@ protected:
    void          *operator new(size_t l) { return TObject::operator new(l); }
    void          *operator new(size_t l, void *ptr) { return TObject::operator new(l,ptr); }
 
-   friend class ::ROOT::TROOTAllocator;
+   friend class ::ROOT::Internal::TROOTAllocator;
 
    TListOfFunctions*GetGlobalFunctions();
 
@@ -183,7 +213,7 @@ public:
    TApplication     *GetApplication() const { return fApplication; }
    TInterpreter     *GetInterpreter() const { return fInterpreter; }
    TClass           *GetClass(const char *name, Bool_t load = kTRUE, Bool_t silent = kFALSE) const;
-   TClass           *GetClass(const type_info &typeinfo, Bool_t load = kTRUE, Bool_t silent = kFALSE) const;
+   TClass           *GetClass(const std::type_info &typeinfo, Bool_t load = kTRUE, Bool_t silent = kFALSE) const;
    TColor           *GetColor(Int_t color) const;
    const char       *GetConfigOptions() const { return fConfigOptions; }
    const char       *GetConfigFeatures() const { return fConfigFeatures; }
@@ -227,7 +257,7 @@ public:
    TSeqCollection   *GetListOfProofs() const { return fProofs; }
    TSeqCollection   *GetClipboard() const { return fClipboard; }
    TSeqCollection   *GetListOfDataSets() const { return fDataSets; }
-   TCollection      *GetListOfEnums();
+   TCollection      *GetListOfEnums(Bool_t load = kFALSE);
    TCollection      *GetListOfFunctionTemplates();
    TList            *GetListOfBrowsables() const { return fBrowsables; }
    TDataType        *GetType(const char *name, Bool_t load = kFALSE) const;
@@ -316,13 +346,31 @@ public:
    static Int_t       RootVersionCode();
    static const char**&GetExtraInterpreterArgs();
 
+   static const TString& GetRootSys();
+   static const TString& GetBinDir();
+   static const TString& GetLibDir();
+   static const TString& GetIncludeDir();
+   static const TString& GetEtcDir();
+   static const TString& GetDataDir();
+   static const TString& GetDocDir();
+   static const TString& GetMacroDir();
+   static const TString& GetTutorialDir();
+   static const TString& GetSourceDir();
+   static const TString& GetIconPath();
+   static const TString& GetTTFFontDir();
+
+   // Backward compatibility function - do not use for new code
+   static const char *GetTutorialsDir();
+
    ClassDef(TROOT,0)  //Top level (or root) structure for all classes
 };
 
 
 namespace ROOT {
    TROOT *GetROOT();
-   R__EXTERN TROOT *gROOTLocal;
+   namespace Internal {
+      R__EXTERN TROOT *gROOTLocal;
+   }
 }
 #define gROOT (ROOT::GetROOT())
 

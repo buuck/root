@@ -24,26 +24,21 @@ namespace clang {
 }
 
 namespace cling {
-  class DeclCollector;
-  class CIFactory {
-  public:
-    // TODO: Add overload that takes file not MemoryBuffer
-    static clang::CompilerInstance* createCI(llvm::StringRef code,
-                                             int argc,
-                                             const char* const *argv,
-                                             const char* llvmdir);
+  class InvocationOptions;
 
-    static clang::CompilerInstance* createCI(llvm::MemoryBuffer* buffer,
-                                             int argc,
-                                             const char* const *argv,
-                                             const char* llvmdir,
-                                             DeclCollector* stateCollector);
-  private:
-    //---------------------------------------------------------------------
-    //! Constructor
-    //---------------------------------------------------------------------
-    CIFactory() = delete;
-    ~CIFactory() = delete;
-  };
+  namespace CIFactory {
+    typedef std::unique_ptr<llvm::MemoryBuffer> MemBufPtr_t;
+
+    // TODO: Add overload that takes file not MemoryBuffer
+
+    clang::CompilerInstance* createCI(llvm::StringRef Code,
+                                      const InvocationOptions& Opts,
+                                      const char* LLVMDir);
+
+    clang::CompilerInstance* createCI(MemBufPtr_t Buffer, int Argc,
+                                      const char* const *Argv,
+                                      const char* LLVMDir,
+                                      bool OnlyLex = false);
+  } // namespace CIFactory
 } // namespace cling
 #endif // CLING_CIFACTORY_H

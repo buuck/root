@@ -19,10 +19,9 @@
 //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TError
 #include "TError.h"
-#endif
 #include <vector>
+#include <forward_list>
 
 #if defined(_WIN32)
    #if _MSC_VER<1300
@@ -37,6 +36,15 @@
 
 namespace ROOT {
 
+namespace Internal {
+template <typename T> class TStdBitsetHelper {
+   // This class is intentionally empty, this is scaffolding to allow the equivalent
+   // of 'template <int N> struct TCollectionProxyInfo::Type<std::bitset<N> >' which
+   // is not effective in C++ (as of gcc 4.3.3).
+};
+}
+
+namespace Detail {
    class TCollectionProxyInfo {
       // This class is a place holder for the information needed
       // to create the proper Collection Proxy.
@@ -47,7 +55,7 @@ namespace ROOT {
       // Same value as TVirtualCollectionProxy.
       static const UInt_t fgIteratorArenaSize = 16; // greater than sizeof(void*) + sizeof(UInt_t)
 
-   /** @class template TCollectionProxyInfo::IteratorValue
+   /** @class ROOT::Detail::TCollectionProxyInfo::IteratorValue
     *
     * Small helper to encapsulate whether to return the value
     * pointed to by the iterator or its address.
@@ -66,7 +74,7 @@ namespace ROOT {
          }
       };
 
-   /** @class template TCollectionProxyInfo::Iterators
+   /** @class ROOT::Detail::TCollectionProxyInfo::Iterators
     *
     * Small helper to implement the function to create,access and destroy
     * iterators.
@@ -140,6 +148,13 @@ namespace ROOT {
          }
          static void* next(void * /* iter_loc */, const void * /* end_loc */) {
             // Should not be used.
+            // In the case of vector, so that the I/O can perform better,
+            // the begin_arena and the end_arena are *not* set to the
+            // address of any iterator rather they are set to the value of
+            // the beginning (and end) address of the vector's data.
+            // Hence this routine (which takes the value of fBegin) can
+            // *not* update where its points to (which in the case of vector
+            // would require update the value of fBegin).
             R__ASSERT(0 && "Intentionally not implemented, do not use.");
             return 0;
          }
@@ -187,7 +202,7 @@ namespace ROOT {
          }
       };
 
-  /** @class TCollectionProxyInfo::Environ TCollectionProxyInfo.h TCollectionProxyInfo.h
+  /** @class ROOT::Detail::TCollectionProxyInfo::Environ
     *
     * Small helper to save proxy environment in the event of
     * recursive calls.
@@ -196,7 +211,6 @@ namespace ROOT {
     * @version 1.0
     * @date    10/10/2004
     */
-#ifndef __CINT__
    struct EnvironBase {
    private:
       EnvironBase(const EnvironBase&); // Intentionally not implement, copy is not supported
@@ -211,11 +225,15 @@ namespace ROOT {
       void*               fObject;
       void*               fStart;
       void*               fTemp;
-      Bool_t              fUseTemp;
+      union {
+         Bool_t fUseTemp;
+         Bool_t fLastValueVecBool;
+      };
       int                 fRefCount;
       size_t              fSpace;
    };
    template <typename T> struct Environ : public EnvironBase {
+      Environ() : fIterator() {}
       typedef T           Iter_t;
       Iter_t              fIterator;
       T& iter() { return fIterator; }
@@ -223,10 +241,6 @@ namespace ROOT {
          return new Environ();
       }
    };
-#else
-   struct EnvironBase;
-   template <typename T> struct Environ;
-#endif
 
    template <class T, class Q> struct PairHolder {
       T first;
@@ -245,7 +259,20 @@ namespace ROOT {
       }
    };
 
-   /** @class TCollectionProxyInfo::Type TCollectionProxyInfo.h TCollectionProxyInfo.h
+   struct SfinaeHelper {
+      // Use SFINAE to get the size of the container
+
+      // In general we get the size of the container with the size method
+      template <class T>
+      static size_t GetContainerSize(const T& c) {return c.size();}
+
+      // Since forward_list does not provide a size operator, we have to
+      // use an alternative. This has a cost of course.
+      template <class T, class ALLOCATOR>
+      static size_t GetContainerSize(const std::forward_list<T,ALLOCATOR>& c) {return std::distance(c.begin(),c.end());}
+   };
+
+   /** @class ROOT::Detail::TCollectionProxyInfo::Type
     *
     * Small helper to encapsulate basic data accesses for
     * all STL continers.
@@ -272,7 +299,7 @@ namespace ROOT {
       }
       static void* size(void* env)  {
          PEnv_t  e = PEnv_t(env);
-         e->fSize   = PCont_t(e->fObject)->size();
+         e->fSize   = SfinaeHelper::GetContainerSize(*PCont_t(e->fObject));
          return &e->fSize;
       }
       static void* clear(void* env)  {
@@ -287,7 +314,7 @@ namespace ROOT {
          ::new(e->buff) Iter_t(c->begin());
 #endif
          e->fIterator = c->begin();
-         e->fSize  = c->size();
+         e->fSize  = SfinaeHelper::GetContainerSize(*c);
          if ( 0 == e->fSize ) return e->fStart = 0;
          TYPENAME T::const_reference ref = *(e->iter());
          return e->fStart = Type<T>::address(ref);
@@ -325,7 +352,7 @@ namespace ROOT {
 
    };
 
-   /** @class TCollectionProxyInfo::Map TCollectionProxyInfo.h TCollectionProxyInfo.h
+   /** @class ROOT::Detail::TCollectionProxyInfo::Pushback
     *
     * Small helper to encapsulate all necessary data accesses for
     * containers like vector, list, deque
@@ -358,7 +385,43 @@ namespace ROOT {
       }
    };
 
-   /** @class TCollectionProxyInfo::Map TCollectionProxyInfo.h TCollectionProxyInfo.h
+   /** @class ROOT::Detail::TCollectionProxyInfo::Pushfront
+    *
+    * Small helper to encapsulate all necessary data accesses for
+    * containers like forward_list
+    *
+    * @author  D.Piparo
+    * @version 1.0
+    * @date    26/02/2015
+    */
+   template <class T> struct Pushfront : public Type<T> {
+      typedef T                      Cont_t;
+      typedef typename T::iterator   Iter_t;
+      typedef typename T::value_type Value_t;
+      typedef Environ<Iter_t>        Env_t;
+      typedef Env_t                 *PEnv_t;
+      typedef Cont_t                *PCont_t;
+      typedef Value_t               *PValue_t;
+      static void resize(void* obj, size_t n) {
+         PCont_t c = PCont_t(obj);
+         c->resize(n);
+      }
+      static void* feed(void *from, void *to, size_t size)  {
+         PCont_t  c = PCont_t(to);
+         if (size==0) return 0;
+         PValue_t m = &(PValue_t(from)[size-1]); // Take the last item
+         // Iterate backwards not to revert ordering
+         for (size_t i=0; i<size; ++i, --m){
+            c->push_front(*m);
+         }
+         return 0;
+      }
+      static int value_offset()  {
+         return 0;
+      }
+   };
+
+   /** @class ROOT::Detail::TCollectionProxyInfo::Insert
     *
     * Small helper to encapsulate all necessary data accesses for
     * containers like set, multiset etc.
@@ -390,7 +453,7 @@ namespace ROOT {
       }
    };
 
-   /** @class TCollectionProxyInfo::Map TCollectionProxyInfo.h TCollectionProxyInfo.h
+   /** @class ROOT::Detail::TCollectionProxyInfo::MapInsert
     *
     * Small helper to encapsulate all necessary data accesses for
     * containers like set, multiset etc.
@@ -424,9 +487,7 @@ namespace ROOT {
 
 
    public:
-#ifndef __CINT__
-      const type_info &fInfo;
-#endif
+      const std::type_info &fInfo;
       size_t fIterSize;
       size_t fValueDiff;
       int    fValueOffset;
@@ -464,7 +525,7 @@ namespace ROOT {
       // Otherwise just call the iterator's destructor.
 
    public:
-      TCollectionProxyInfo(const type_info& info,
+      TCollectionProxyInfo(const std::type_info& info,
                            size_t iter_size,
                            size_t value_diff,
                            int    value_offset,
@@ -496,15 +557,15 @@ namespace ROOT {
       }
 
       /// Generate proxy from template
-      template <class T> static ROOT::TCollectionProxyInfo* Generate(const T&)  {
+      template <class T> static TCollectionProxyInfo* Generate(const T&)  {
          // Generate a TCollectionProxyInfo given a TCollectionProxyInfo::Type
          // template (used to described the behavior of the stl collection.
          // Typical use looks like:
-         //      ::ROOT::TCollectionProxyInfo::Generate(TCollectionProxyInfo::Pushback< std::vector<string> >()));
+         //      ::ROOT::Detail::TCollectionProxyInfo::Generate(TCollectionProxyInfo::Pushback< std::vector<string> >()));
 
          PairHolder<TYPENAME T::Value_t, TYPENAME T::Value_t>* p =
             (PairHolder<TYPENAME T::Value_t, TYPENAME T::Value_t>*)0x1000;
-         return new ROOT::TCollectionProxyInfo(typeid(TYPENAME T::Cont_t),
+         return new TCollectionProxyInfo(typeid(TYPENAME T::Cont_t),
                                                sizeof(TYPENAME T::Iter_t),
                                                (((char*)&p->second)-((char*)&p->first)),
                                                T::value_offset(),
@@ -525,16 +586,16 @@ namespace ROOT {
                                                T::Iterators_t::destruct2);
       }
 
-      template <class T> static ROOT::TCollectionProxyInfo Get(const T&)  {
+      template <class T> static TCollectionProxyInfo Get(const T&)  {
 
          // Generate a TCollectionProxyInfo given a TCollectionProxyInfo::Type
          // template (used to described the behavior of the stl collection.
          // Typical use looks like:
-         //      ::ROOT::TCollectionProxyInfo::Get(TCollectionProxyInfo::Pushback< std::vector<string> >()));
+         //      ::ROOT::Detail::TCollectionProxyInfo::Get(TCollectionProxyInfo::Pushback< std::vector<string> >()));
 
          PairHolder<TYPENAME T::Value_t, TYPENAME T::Value_t>* p =
             (PairHolder<TYPENAME T::Value_t, TYPENAME T::Value_t>*)0x1000;
-         return ROOT::TCollectionProxyInfo(typeid(TYPENAME T::Cont_t),
+         return TCollectionProxyInfo(typeid(TYPENAME T::Cont_t),
                                            sizeof(TYPENAME T::Iter_t),
                                            (((char*)&p->second)-((char*)&p->first)),
                                            T::value_offset(),
@@ -678,22 +739,13 @@ namespace ROOT {
       }
    };
 
-#ifndef __CINT__
    // Need specialization for boolean references due to stupid STL std::vector<bool>
-   template<> inline void* ::ROOT::TCollectionProxyInfo::Address<std::vector<Bool_t>::const_reference>::address(std::vector<Bool_t>::const_reference ) {
+   template<> inline void* TCollectionProxyInfo::Address<std::vector<Bool_t>::const_reference>::address(std::vector<Bool_t>::const_reference ) {
       R__ASSERT(0);
       return 0;
    }
-#endif
 
-   template <typename T> class TStdBitsetHelper {
-      // This class is intentionally empty, this is scaffolding to allow the equivalent
-      // of 'template <int N> struct TCollectionProxyInfo::Type<std::bitset<N> >' which
-      // is not effective in C++ (as of gcc 4.3.3).
-   };
-
-#ifndef __CINT__
-   template <typename Bitset_t> struct TCollectionProxyInfo::Type<ROOT::TStdBitsetHelper<Bitset_t> > : public TCollectionProxyInfo::Address<const Bool_t &>
+   template <typename Bitset_t> struct TCollectionProxyInfo::Type<Internal::TStdBitsetHelper<Bitset_t> > : public TCollectionProxyInfo::Address<const Bool_t &>
    {
       typedef Bitset_t                 Cont_t;
       typedef std::pair<size_t,Bool_t> Iter_t;
@@ -723,14 +775,14 @@ namespace ROOT {
          e->fIterator.first = 0;
          e->fIterator.second = c->size() > 0 ? c->test(e->fIterator.first) : false ;  // Iterator actually hold the value.
          e->fSize  = c->size();
-         return 0;
+         return &(e->fIterator.second);
       }
       static void* next(void* env)  {
          PEnv_t  e = PEnv_t(env);
          PCont_t c = PCont_t(e->fObject);
          for (; e->fIdx > 0 && e->fIterator.first != c->size(); ++(e->fIterator.first), --e->fIdx){ }
          e->fIterator.second = (e->fIterator.first != c->size()) ? c->test(e->fIterator.first) : false;
-         return 0;
+         return &(e->fIterator.second);
       }
       static void* construct(void*,size_t)  {
          // Nothing to construct.
@@ -797,14 +849,15 @@ namespace ROOT {
    };
 
    template <typename Bitset_t>
-   struct TCollectionProxyInfo::Pushback<ROOT::TStdBitsetHelper<Bitset_t>  > : public TCollectionProxyInfo::Type<TStdBitsetHelper<Bitset_t> > {
-      typedef Bitset_t         Cont_t;
-      typedef bool             Iter_t;
-      typedef bool             Value_t;
-      typedef Environ<Iter_t>  Env_t;
-      typedef Env_t           *PEnv_t;
-      typedef Cont_t          *PCont_t;
-      typedef Value_t         *PValue_t;
+   struct TCollectionProxyInfo::Pushback<Internal::TStdBitsetHelper<Bitset_t>  > : public TCollectionProxyInfo::Type<Internal::TStdBitsetHelper<Bitset_t> > {
+      using InfoBase_t = TCollectionProxyInfo::Type<Internal::TStdBitsetHelper<Bitset_t> >;
+      using typename InfoBase_t::Cont_t;
+      using typename InfoBase_t::Iter_t;
+      using typename InfoBase_t::Value_t;
+      using typename InfoBase_t::Env_t;
+      using typename InfoBase_t::PEnv_t;
+      using typename InfoBase_t::PCont_t;
+      using typename InfoBase_t::PValue_t;
 
       static void resize(void*,size_t)  {
       }
@@ -819,8 +872,11 @@ namespace ROOT {
          return 0;
       }
    };
-#endif
 
-}
+} // namespace Detail
+
+// For (reasonable) backward compatibility:
+using namespace Detail;
+} // namespace ROOT
 
 #endif

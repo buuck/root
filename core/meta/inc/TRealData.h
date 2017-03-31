@@ -21,12 +21,8 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TObject
 #include "TObject.h"
-#endif
-#ifndef ROOT_TString
 #include "TString.h"
-#endif
 
 class TDataMember;
 
@@ -60,6 +56,8 @@ public:
    Bool_t              IsObject() const {return fIsObject;}
    void                SetIsObject(Bool_t isObject) {fIsObject=isObject;}
    void                WriteRealData(void *pointer, char *&buffer);
+
+   static void         GetName(TString &output, TDataMember *dm);
 
    ClassDef(TRealData,0)  //Description of persistent data members
 };

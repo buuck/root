@@ -7,20 +7,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_OBJECT_RECORD_STREAMER
-#define LLVM_OBJECT_RECORD_STREAMER
+#ifndef LLVM_LIB_OBJECT_RECORDSTREAMER_H
+#define LLVM_LIB_OBJECT_RECORDSTREAMER_H
 
 #include "llvm/MC/MCStreamer.h"
 
 namespace llvm {
 class RecordStreamer : public MCStreamer {
 public:
-  enum State { NeverSeen, Global, Defined, DefinedGlobal, Used };
+  enum State { NeverSeen, Global, GlobalWeak, Defined, DefinedGlobal, Used };
 
 private:
   StringMap<State> Symbols;
   void markDefined(const MCSymbol &Symbol);
-  void markGlobal(const MCSymbol &Symbol);
+  void markGlobal(const MCSymbol &Symbol, MCSymbolAttr Attribute);
   void markUsed(const MCSymbol &Symbol);
   void visitUsedSymbol(const MCSymbol &Sym) override;
 
@@ -33,7 +33,7 @@ public:
   void EmitLabel(MCSymbol *Symbol) override;
   void EmitAssignment(MCSymbol *Symbol, const MCExpr *Value) override;
   bool EmitSymbolAttribute(MCSymbol *Symbol, MCSymbolAttr Attribute) override;
-  void EmitZerofill(const MCSection *Section, MCSymbol *Symbol, uint64_t Size,
+  void EmitZerofill(MCSection *Section, MCSymbol *Symbol, uint64_t Size,
                     unsigned ByteAlignment) override;
   void EmitCommonSymbol(MCSymbol *Symbol, uint64_t Size,
                         unsigned ByteAlignment) override;

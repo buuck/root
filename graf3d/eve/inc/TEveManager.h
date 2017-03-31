@@ -79,7 +79,7 @@ public:
       ClassDef(TExceptionHandler, 0); // Exception handler for Eve exceptions.
    };
 
-private:
+protected:
    TExceptionHandler        *fExcHandler;
 
    TMap                     *fVizDB;
@@ -110,7 +110,6 @@ private:
    Bool_t                    fTimerActive;
    TTimer                    fRedrawTimer;
 
-protected:
    // Fine grained scene updates.
    TExMap                   *fStampedElements;
 
@@ -230,6 +229,13 @@ public:
 
    static TEveManager* Create(Bool_t map_window=kTRUE, Option_t* opt="FIV");
    static void         Terminate();
+
+   // Access to internals, needed for low-level control in advanced
+   // applications.
+
+   void    EnforceTimerActive (Bool_t ta) { fTimerActive = ta; }
+
+   TExMap* PtrToStampedElements() { return fStampedElements; }
 
    ClassDef(TEveManager, 0); // Eve application manager.
 };

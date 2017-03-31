@@ -24,9 +24,13 @@ using namespace llvm::opt;
 
 Compilation::Compilation(const Driver &D, const ToolChain &_DefaultToolChain,
                          InputArgList *_Args, DerivedArgList *_TranslatedArgs)
-    : TheDriver(D), DefaultToolChain(_DefaultToolChain), Args(_Args),
-      TranslatedArgs(_TranslatedArgs), Redirects(nullptr),
-      ForDiagnostics(false) {}
+    : TheDriver(D), DefaultToolChain(_DefaultToolChain), ActiveOffloadMask(0u),
+      Args(_Args), TranslatedArgs(_TranslatedArgs), Redirects(nullptr),
+      ForDiagnostics(false) {
+  // The offloading host toolchain is the default tool chain.
+  OrderedOffloadingToolchains.insert(
+      std::make_pair(Action::OFK_Host, &DefaultToolChain));
+}
 
 Compilation::~Compilation() {
   delete TranslatedArgs;
@@ -39,13 +43,9 @@ Compilation::~Compilation() {
     if (it->second != TranslatedArgs)
       delete it->second;
 
-  // Free the actions, if built.
-  for (ActionList::iterator it = Actions.begin(), ie = Actions.end();
-       it != ie; ++it)
-    delete *it;
-
   // Free redirections of stdout/stderr.
   if (Redirects) {
+    delete Redirects[0];
     delete Redirects[1];
     delete Redirects[2];
     delete [] Redirects;
@@ -88,7 +88,7 @@ bool Compilation::CleanupFile(const char *File, bool IssueErrors) const {
     // Failure is only failure if the file exists and is "regular". We checked
     // for it being regular before, and llvm::sys::fs::remove ignores ENOENT,
     // so we don't need to check again.
-    
+
     if (IssueErrors)
       getDriver().Diag(clang::diag::err_drv_unable_to_remove_file)
         << EC.message();
@@ -131,13 +131,13 @@ int Compilation::ExecuteCommand(const Command &C,
     // Follow gcc implementation of CC_PRINT_OPTIONS; we could also cache the
     // output stream.
     if (getDriver().CCPrintOptions && getDriver().CCPrintOptionsFilename) {
-      std::string Error;
-      OS = new llvm::raw_fd_ostream(getDriver().CCPrintOptionsFilename, Error,
+      std::error_code EC;
+      OS = new llvm::raw_fd_ostream(getDriver().CCPrintOptionsFilename, EC,
                                     llvm::sys::fs::F_Append |
                                         llvm::sys::fs::F_Text);
-      if (!Error.empty()) {
+      if (EC) {
         getDriver().Diag(clang::diag::err_drv_cc_print_options_failure)
-          << Error;
+            << EC.message();
         FailingCommand = &C;
         delete OS;
         return 1;
@@ -167,44 +167,17 @@ int Compilation::ExecuteCommand(const Command &C,
   return ExecutionFailed ? 1 : Res;
 }
 
-typedef SmallVectorImpl< std::pair<int, const Command *> > FailingCommandList;
-
-static bool ActionFailed(const Action *A,
-                         const FailingCommandList &FailingCommands) {
-
-  if (FailingCommands.empty())
-    return false;
-
-  for (FailingCommandList::const_iterator CI = FailingCommands.begin(),
-         CE = FailingCommands.end(); CI != CE; ++CI)
-    if (A == &(CI->second->getSource()))
-      return true;
-
-  for (Action::const_iterator AI = A->begin(), AE = A->end(); AI != AE; ++AI)
-    if (ActionFailed(*AI, FailingCommands))
-      return true;
-
-  return false;
-}
-
-static bool InputsOk(const Command &C,
-                     const FailingCommandList &FailingCommands) {
-  return !ActionFailed(&C.getSource(), FailingCommands);
-}
-
-void Compilation::ExecuteJob(const Job &J,
-                             FailingCommandList &FailingCommands) const {
-  if (const Command *C = dyn_cast<Command>(&J)) {
-    if (!InputsOk(*C, FailingCommands))
-      return;
+void Compilation::ExecuteJobs(
+    const JobList &Jobs,
+    SmallVectorImpl<std::pair<int, const Command *>> &FailingCommands) const {
+  for (const auto &Job : Jobs) {
     const Command *FailingCommand = nullptr;
-    if (int Res = ExecuteCommand(*C, FailingCommand))
+    if (int Res = ExecuteCommand(Job, FailingCommand)) {
       FailingCommands.push_back(std::make_pair(Res, FailingCommand));
-  } else {
-    const JobList *Jobs = cast<JobList>(&J);
-    for (JobList::const_iterator it = Jobs->begin(), ie = Jobs->end();
-         it != ie; ++it)
-      ExecuteJob(**it, FailingCommands);
+      // Bail as soon as one command fails, so we don't output duplicate error
+      // messages if we die on e.g. the same file.
+      return;
+    }
   }
 }
 
@@ -212,7 +185,8 @@ void Compilation::initCompilationForDiagnostics() {
   ForDiagnostics = true;
 
   // Free actions and jobs.
-  DeleteContainerPointers(Actions);
+  Actions.clear();
+  AllActions.clear();
   Jobs.clear();
 
   // Clear temporary/results file lists.
@@ -233,10 +207,14 @@ void Compilation::initCompilationForDiagnostics() {
   // Redirect stdout/stderr to /dev/null.
   Redirects = new const StringRef*[3]();
   Redirects[0] = nullptr;
-  Redirects[1] = new const StringRef();
-  Redirects[2] = new const StringRef();
+  Redirects[1] = new StringRef();
+  Redirects[2] = new StringRef();
 }
 
 StringRef Compilation::getSysRoot() const {
   return getDriver().SysRoot;
+}
+
+void Compilation::Redirect(const StringRef** Redirects) {
+  this->Redirects = Redirects;
 }

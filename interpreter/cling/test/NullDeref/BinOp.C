@@ -7,11 +7,12 @@
 //------------------------------------------------------------------------------
 
 // RUN: cat %s | %cling -Xclang -verify
+// XFAIL: powerpc64
 //This file checks a pointer load operation for null prt dereference.
 int *p = 0;
 int x;
-x = *p + 2; // expected-warning {{null passed to a callee which requires a non-null argument}}
-x = 2 + *p; // expected-warning {{null passed to a callee which requires a non-null argument}}
+x = *p + 2; // expected-warning {{null passed to a callee that requires a non-null argument}}
+x = 2 + *p; // expected-warning {{null passed to a callee that requires a non-null argument}}
 
-x = *p > 2; // expected-warning {{null passed to a callee which requires a non-null argument}}
-x = 2 > *p; // expected-warning {{null passed to a callee which requires a non-null argument}}
+x = *p > 2; // expected-warning {{null passed to a callee that requires a non-null argument}}
+x = 2 > *p; // expected-warning {{null passed to a callee that requires a non-null argument}}

@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef PPC_MACHINE_FUNCTION_INFO_H
-#define PPC_MACHINE_FUNCTION_INFO_H
+#ifndef LLVM_LIB_TARGET_POWERPC_PPCMACHINEFUNCTIONINFO_H
+#define LLVM_LIB_TARGET_POWERPC_PPCMACHINEFUNCTIONINFO_H
 
 #include "llvm/CodeGen/MachineFunction.h"
 
@@ -34,6 +34,9 @@ class PPCFunctionInfo : public MachineFunctionInfo {
 
   /// Frame index where the old base pointer is stored.
   int BasePointerSaveIndex;
+
+  /// Frame index where the old PIC base pointer is stored.
+  int PICBasePointerSaveIndex;
 
   /// MustSaveLR - Indicates whether LR is defined (or clobbered) in the current
   /// function.  This is only valid after the initial scan of the function by
@@ -58,6 +61,9 @@ class PPCFunctionInfo : public MachineFunctionInfo {
   /// requires that the code generator produce a store of LR to the stack on
   /// entry, even though LR may otherwise apparently not be used.
   bool LRStoreRequired;
+
+  /// This function makes use of the PPC64 ELF TOC base pointer (register r2).
+  bool UsesTOCBasePtr;
 
   /// MinReservedArea - This is the frame size that is at least reserved in a
   /// potential caller (parameter+linkage area).
@@ -98,16 +104,22 @@ class PPCFunctionInfo : public MachineFunctionInfo {
   /// Whether this uses the PIC Base register or not.
   bool UsesPICBase;
 
+  /// True if this function has a subset of CSRs that is handled explicitly via
+  /// copies
+  bool IsSplitCSR;
+
 public:
   explicit PPCFunctionInfo(MachineFunction &MF) 
     : FramePointerSaveIndex(0),
       ReturnAddrSaveIndex(0),
       BasePointerSaveIndex(0),
+      PICBasePointerSaveIndex(0),
       HasSpills(false),
       HasNonRISpills(false),
       SpillsCR(false),
       SpillsVRSAVE(false),
       LRStoreRequired(false),
+      UsesTOCBasePtr(false),
       MinReservedArea(0),
       TailCallSPDelta(0),
       HasFastCall(false),
@@ -117,7 +129,8 @@ public:
       VarArgsNumFPR(0),
       CRSpillFrameIndex(0),
       MF(MF),
-      UsesPICBase(0) {}
+      UsesPICBase(0),
+      IsSplitCSR(false) {}
 
   int getFramePointerSaveIndex() const { return FramePointerSaveIndex; }
   void setFramePointerSaveIndex(int Idx) { FramePointerSaveIndex = Idx; }
@@ -127,6 +140,9 @@ public:
 
   int getBasePointerSaveIndex() const { return BasePointerSaveIndex; }
   void setBasePointerSaveIndex(int Idx) { BasePointerSaveIndex = Idx; }
+
+  int getPICBasePointerSaveIndex() const { return PICBasePointerSaveIndex; }
+  void setPICBasePointerSaveIndex(int Idx) { PICBasePointerSaveIndex = Idx; }
 
   unsigned getMinReservedArea() const { return MinReservedArea; }
   void setMinReservedArea(unsigned size) { MinReservedArea = size; }
@@ -157,6 +173,9 @@ public:
   void setLRStoreRequired() { LRStoreRequired = true; }
   bool isLRStoreRequired() const { return LRStoreRequired; }
 
+  void setUsesTOCBasePtr()    { UsesTOCBasePtr = true; }
+  bool usesTOCBasePtr() const { return UsesTOCBasePtr; }
+
   void setHasFastCall() { HasFastCall = true; }
   bool hasFastCall() const { return HasFastCall;}
 
@@ -182,7 +201,14 @@ public:
   void setUsesPICBase(bool uses) { UsesPICBase = uses; }
   bool usesPICBase() const { return UsesPICBase; }
 
+  bool isSplitCSR() const { return IsSplitCSR; }
+  void setIsSplitCSR(bool s) { IsSplitCSR = s; }
+
   MCSymbol *getPICOffsetSymbol() const;
+
+  MCSymbol *getGlobalEPSymbol() const;
+  MCSymbol *getLocalEPSymbol() const;
+  MCSymbol *getTOCOffsetSymbol() const;
 };
 
 } // end of namespace llvm

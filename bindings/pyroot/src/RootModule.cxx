@@ -13,20 +13,21 @@
 #include "TCustomPyTypes.h"
 #include "TTupleOfInstances.h"
 #include "RootWrapper.h"
+#include "TCallContext.h"
 #include "Utility.h"
-#include "Adapters.h"
 
 // ROOT
-#include "TROOT.h"
-#include "TClass.h"
-#include "TInterpreter.h"
-#include "TObject.h"
+#include "TObject.h"         // for FindObject
+#include "TROOT.h"           // for ProcessLine and FindObject
 
-#include "TBufferFile.h"
+
+#include "TBufferFile.h"     // for pickling
 
 // Standard
 #include <string>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 
 //- from Python's dictobject.c -------------------------------------------------
@@ -104,6 +105,11 @@ static PyNumberMethods nullptr_as_number = {
 #if PY_VERSION_HEX >= 0x02050000
    , 0                                // nb_index
 #endif
+#if PY_VERSION_HEX >= 0x03050000
+   , 0                                // nb_matrix_multiply
+   , 0                                // nb_inplace_matrix_multiply
+#endif
+
    };
 
 static PyTypeObject PyNullPtr_t_Type = {
@@ -125,6 +131,9 @@ static PyTypeObject PyNullPtr_t_Type = {
 #if PY_VERSION_HEX >= 0x02060000
    , 0                 // tp_version_tag
 #endif
+#if PY_VERSION_HEX >= 0x03040000
+   , 0                        // tp_finalize
+#endif
 };
 
 PyObject _PyROOT_NullPtrStruct = {
@@ -135,6 +144,8 @@ PyObject _PyROOT_NullPtrStruct = {
 namespace PyROOT {
    PyObject* gRootModule = 0;
    PyObject* gNullPtrObject = 0;
+   std::vector<std::pair<Cppyy::TCppType_t, Cppyy::TCppType_t> > gPinnedTypes;
+   std::vector<Cppyy::TCppType_t> gIgnorePinnings;
 }
 
 
@@ -143,7 +154,8 @@ namespace {
 
    using namespace PyROOT;
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+
    PyObject* RootModuleResetCallback( PyObject*, PyObject* )
    {
       gRootModule = 0;   // reference was borrowed
@@ -151,10 +163,11 @@ namespace {
       return Py_None;
    }
 
-//____________________________________________________________________________
-   PyObject* LookupRootEntity( PyObject* pyname, PyObject* args )
+////////////////////////////////////////////////////////////////////////////////
+/// Find a match within the ROOT module for something with name 'pyname'.
+
+   PyObject* LookupCppEntity( PyObject* pyname, PyObject* args )
    {
-   // Find a match within the ROOT module for something with name 'pyname'.
       const char* cname = 0; long macro_ok = 0;
       if ( pyname && PyROOT_PyUnicode_CheckExact( pyname ) )
          cname = PyROOT_PyUnicode_AsString( pyname );
@@ -178,13 +191,13 @@ namespace {
 
       // 2nd attempt: construct name as a class
          PyErr_Clear();
-         attr = MakeRootClassFromString( name, 0 /* scope */);
+         attr = CreateScopeProxy( name, 0 /* parent */);
          if ( attr != 0 )
             return attr;
 
       // 3rd attempt: lookup name as global variable
          PyErr_Clear();
-         attr = GetRootGlobalFromString( name );
+         attr = GetCppGlobal( name );
          if ( attr != 0 )
             return attr;
 
@@ -192,10 +205,10 @@ namespace {
          PyErr_Clear();
          TObject* object = gROOT->FindObject( name.c_str() );
          if ( object != 0 )
-            return BindRootObject( object, object->IsA() );
+            return BindCppObject( object, object->IsA()->GetName() );
 
       // 5th attempt: global enum (pretend int, TODO: is fine for C++98, not in C++11)
-         if ( gInterpreter->ClassInfo_IsEnum( name.c_str() ) ) {
+         if ( Cppyy::IsEnum( name ) ) {
             Py_INCREF( &PyInt_Type );
             return (PyObject*)&PyInt_Type;
          }
@@ -208,7 +221,7 @@ namespace {
                     << ";true;\n#else\nfalse;\n#endif";
             if ( gROOT->ProcessLine( ismacro.str().c_str() ) ) {
             // can now retrieve this as a global
-               attr = GetRootGlobalFromString( "_pyroot_"+name );
+               attr = GetCppGlobal( "_pyroot_"+name );
                if ( attr != 0 )
                   return attr;
             }
@@ -220,7 +233,8 @@ namespace {
       return 0;
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+
 #if PY_VERSION_HEX >= 0x03030000
    inline PyDictKeyEntry* OrgDictLookup(
          PyDictObject* mp, PyObject* key, Py_hash_t hash, PyObject*** value_addr )
@@ -258,8 +272,22 @@ namespace {
    // all failed, start calling into ROOT
       gDictLookupActive = kTRUE;
 
+   // ROOT globals (the round-about lookup is to prevent recursion)
+      PyObject* gval = PyDict_GetItem( PyModule_GetDict( gRootModule ), key );
+      if ( gval ) {
+         Py_INCREF( gval );
+         ep->me_value = gval;
+         ep->me_key   = key;
+         ep->me_hash  = hash;
+#if PY_VERSION_HEX >= 0x03030000
+         *value_addr  = &gval;
+#endif
+         gDictLookupActive = kFALSE;
+         return ep;
+      }
+
    // attempt to get ROOT enum/global/class
-      PyObject* val = LookupRootEntity( key, 0 );
+      PyObject* val = LookupCppEntity( key, 0 );
 
       if ( val != 0 ) {
       // success ...
@@ -289,33 +317,70 @@ namespace {
       } else
          PyErr_Clear();
 
+#if PY_VERSION_HEX >= 0x03030000
+      if ( mp->ma_keys->dk_usable <= 0 ) {
+      // big risk that this lookup will result in a resize, so force it here
+      // to be able to reset the lookup function; of course, this is nowhere
+      // near fool-proof, but should cover interactive usage ...
+         PYROOT_GET_DICT_LOOKUP( mp ) = gDictLookupOrg;
+         const int maxinsert = 5;
+         PyObject* buf[maxinsert];
+         for ( int varmax = 1; varmax <= maxinsert; ++varmax ) {
+            for ( int ivar = 0; ivar < varmax; ++ivar ) {
+               buf[ivar] = PyROOT_PyUnicode_FromFormat( "__ROOT_FORCE_RESIZE_%d", ivar );
+               PyDict_SetItem( (PyObject*)mp, buf[ivar], Py_None);
+            }
+            for ( int ivar = 0; ivar < varmax; ++ivar ) {
+               PyDict_DelItem( (PyObject*)mp, buf[ivar] );
+               Py_DECREF( buf[ivar] );
+            }
+            if ( 0 < mp->ma_keys->dk_usable )
+               break;
+         }
+
+      // make sure the entry pointer is still valid by re-doing the lookup
+         ep = PYROOT_ORGDICT_LOOKUP( mp, key, hash, value_addr );
+
+      // full reset of all lookup functions
+         gDictLookupOrg = PYROOT_GET_DICT_LOOKUP( mp );
+         PYROOT_GET_DICT_LOOKUP( mp ) = RootLookDictString; // restore
+      }
+#endif
+
    // stopped calling into ROOT
       gDictLookupActive = kFALSE;
 
       return ep;
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Modify the given dictionary to install the lookup function that also
+/// tries the ROOT namespace before failing. Called on a module's dictionary,
+/// this allows for lazy lookups.
+
    PyObject* SetRootLazyLookup( PyObject*, PyObject* args )
    {
-   // Modify the given dictionary to install the lookup function that also
-   // tries the ROOT namespace before failing. Called on a module's dictionary,
-   // this allows for lazy lookups.
       PyDictObject* dict = 0;
       if ( ! PyArg_ParseTuple( args, const_cast< char* >( "O!" ), &PyDict_Type, &dict ) )
          return 0;
 
+   // Notwithstanding the code changes, the following does not work for p3.3 and
+   // later: once the dictionary is resized for anything other than an insert (see
+   // hack in RootLookDictString), its lookup function on its keys will revert to
+   // the default (lookdict_unicode_nodummy) and only if the resizing dictionary
+   // has the generic lookdict function as dk_lookup for its keys, will this be
+   // set on the new keys.
       PYROOT_GET_DICT_LOOKUP( dict ) = RootLookDictString;
 
       Py_INCREF( Py_None );
       return Py_None;
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Create a binding for a templated class instantiation.
+
    PyObject* MakeRootTemplateClass( PyObject*, PyObject* args )
    {
-   // Create a binding for a templated class instantiation.
-
    // args is class name + template arguments; build full instantiation
       Py_ssize_t nArgs = PyTuple_GET_SIZE( args );
       if ( nArgs < 2 ) {
@@ -331,13 +396,14 @@ namespace {
       std::string name = PyROOT_PyUnicode_AsString( pyname );
       Py_DECREF( pyname );
 
-      return MakeRootClassFromString( name );
+      return CreateScopeProxy( name );
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Helper to get the address (address-of-address) of various object proxy types.
+
    void* GetObjectProxyAddress( PyObject*, PyObject* args )
    {
-   // Helper to get the address (address-of-address) of various object proxy types.
       ObjectProxy* pyobj = 0;
       PyObject* pyname = 0;
       if ( PyArg_ParseTuple( args, const_cast< char* >( "O|O!" ), &pyobj,
@@ -379,6 +445,22 @@ namespace {
       return 0;
    }
 
+   PyObject* _addressof_common( PyObject* dummy ) {
+      if ( dummy == Py_None || dummy == gNullPtrObject ) {
+         Py_INCREF( gNullPtrObject );
+         return gNullPtrObject;
+      }
+      if ( !PyErr_Occurred() ) {
+         PyObject* str = PyObject_Str( dummy );
+         if ( str && PyROOT_PyUnicode_Check( str ) )
+            PyErr_Format( PyExc_ValueError, "unknown object %s", PyBytes_AS_STRING( str ) );
+         else
+            PyErr_Format( PyExc_ValueError, "unknown object at %p", (void*)dummy );
+         Py_XDECREF( str );
+      }
+      return 0;
+   }
+
    PyObject* AddressOf( PyObject* dummy, PyObject* args )
    {
    // Return object proxy address as an indexable buffer.
@@ -390,7 +472,7 @@ namespace {
          if ( addr )
             return BufFac_t::Instance()->PyBuffer_FromMemory( (Long_t*)&addr, 1 );
       }
-      return 0;
+      return 0;//_addressof_common( dummy );
    }
 
    PyObject* addressof( PyObject* dummy, PyObject* args )
@@ -404,7 +486,7 @@ namespace {
          Utility::GetBuffer( PyTuple_GetItem( args, 0 ), '*', 1, addr, kFALSE );
          if ( addr ) return PyLong_FromLong( (Long_t)addr );
       }
-      return 0;
+      return _addressof_common( dummy );
    }
 
    PyObject* AsCObject( PyObject* dummy, PyObject* args )
@@ -417,13 +499,14 @@ namespace {
       return 0;
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Helper to factorize the common code between MakeNullPointer and BindObject.
+
    PyObject* BindObject_( void* addr, PyObject* pyname )
    {
-   // Helper to factorize the common code between MakeNullPointer and BindObject.
-
       if ( ! PyROOT_PyUnicode_Check( pyname ) ) {     // name given as string
-         PyObject* nattr = PyObject_GetAttr( pyname, PyStrings::gName );
+         PyObject* nattr = PyObject_GetAttr( pyname, PyStrings::gCppName );
+         if ( ! nattr ) nattr = PyObject_GetAttr( pyname, PyStrings::gName );
          if ( nattr )                        // object is actually a class
             pyname = nattr;
          pyname = PyObject_Str( pyname );
@@ -432,7 +515,7 @@ namespace {
          Py_INCREF( pyname );
       }
 
-      TClass* klass = TClass::GetClass( PyROOT_PyUnicode_AsString( pyname ) );
+      Cppyy::TCppType_t klass = (Cppyy::TCppType_t)Cppyy::GetScope( PyROOT_PyUnicode_AsString( pyname ) );
       Py_DECREF( pyname );
 
       if ( ! klass ) {
@@ -441,13 +524,14 @@ namespace {
          return 0;
       }
 
-      return BindRootObjectNoCast( addr, klass, kFALSE );
+      return BindCppObjectNoCast( addr, klass, kFALSE );
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// From a long representing an address or a PyCapsule/CObject, bind to a class.
+
    PyObject* BindObject( PyObject*, PyObject* args )
    {
-   // From a long representing an address or a PyCapsule/CObject, bind to a class.
       Py_ssize_t argc = PyTuple_GET_SIZE( args );
       if ( argc != 2 ) {
          PyErr_Format( PyExc_TypeError,
@@ -478,11 +562,12 @@ namespace {
       return BindObject_( addr, PyTuple_GET_ITEM( args, 1 ) );
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Create an object of the given type point to NULL (historic note: this
+/// function is older than BindObject(), which can be used instead).
+
    PyObject* MakeNullPointer( PyObject*, PyObject* args )
    {
-   // Create an object of the given type point to NULL (historic note: this
-   // function is older than BindObject(), which can be used instead).
       Py_ssize_t argc = PyTuple_GET_SIZE( args );
       if ( argc != 0 && argc != 1 ) {
          PyErr_Format( PyExc_TypeError,
@@ -499,10 +584,11 @@ namespace {
       return BindObject_( 0, PyTuple_GET_ITEM( args, 0 ) );
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// This method is a helper for (un)pickling of ObjectProxy instances.
+
    PyObject* ObjectProxyExpand( PyObject*, PyObject* args )
    {
-   // This method is a helper for (un)pickling of ObjectProxy instances.
       PyObject* pybuf = 0, *pyname = 0;
       if ( ! PyArg_ParseTuple( args, const_cast< char* >( "O!O!:__expand__" ),
                &PyBytes_Type, &pybuf, &PyBytes_Type, &pyname ) )
@@ -533,7 +619,7 @@ namespace {
          newObj = buf.ReadObjectAny( 0 );
       }
 
-      PyObject* result = BindRootObject( newObj, TClass::GetClass( clname ) );
+      PyObject* result = BindCppObject( newObj, clname );
       if ( result ) {
       // this object is to be owned by the interpreter, assuming that the call
       // originated from there
@@ -543,17 +629,18 @@ namespace {
       return result;
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Set the global memory policy, which affects object ownership when objects
+/// are passed as function arguments.
+
    PyObject* SetMemoryPolicy( PyObject*, PyObject* args )
    {
-   // Set the global memory policy, which affects object ownership when objects
-   // are passed as function arguments.
       PyObject* policy = 0;
       if ( ! PyArg_ParseTuple( args, const_cast< char* >( "O!" ), &PyInt_Type, &policy ) )
          return 0;
 
       Long_t l = PyInt_AS_LONG( policy );
-      if ( Utility::SetMemoryPolicy( (Utility::EMemoryPolicy)l ) ) {
+      if ( TCallContext::SetMemoryPolicy( (TCallContext::ECallFlags)l ) ) {
          Py_INCREF( Py_None );
          return Py_None;
       }
@@ -562,17 +649,18 @@ namespace {
       return 0;
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Set the global signal policy, which determines whether a jmp address
+/// should be saved to return to after a C++ segfault.
+
    PyObject* SetSignalPolicy( PyObject*, PyObject* args )
    {
-   // Set the global signal policy, which determines whether a jmp address
-   // should be saved to return to after a C++ segfault.
       PyObject* policy = 0;
       if ( ! PyArg_ParseTuple( args, const_cast< char* >( "O!" ), &PyInt_Type, &policy ) )
          return 0;
 
       Long_t l = PyInt_AS_LONG( policy );
-      if ( Utility::SetSignalPolicy( (Utility::ESignalPolicy)l ) ) {
+      if ( TCallContext::SetSignalPolicy( (TCallContext::ECallFlags)l ) ) {
          Py_INCREF( Py_None );
          return Py_None;
       }
@@ -581,10 +669,11 @@ namespace {
       return 0;
    }
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Set the ownership (True is python-owns) for the given object.
+
    PyObject* SetOwnership( PyObject*, PyObject* args )
    {
-   // Set the ownership (True is python-owns) for the given object.
       ObjectProxy* pyobj = 0; PyObject* pykeep = 0;
       if ( ! PyArg_ParseTuple( args, const_cast< char* >( "O!O!" ),
                 &ObjectProxy_Type, (void*)&pyobj, &PyInt_Type, &pykeep ) )
@@ -596,16 +685,78 @@ namespace {
       return Py_None;
    }
 
+////////////////////////////////////////////////////////////////////////////////
+/// Add a smart pointer to the list of known smart pointer types.
+
+   PyObject* AddSmartPtrType( PyObject*, PyObject* args )
+   {
+      const char* type_name;
+      if ( ! PyArg_ParseTuple( args, const_cast< char* >( "s" ), &type_name ) )
+         return nullptr;
+
+      Cppyy::AddSmartPtrType( type_name );
+
+      Py_RETURN_NONE;
+   }
+
+
+////////////////////////////////////////////////////////////////////////////////
+/// Add a pinning so that objects of type `derived' are interpreted as
+/// objects of type `base'.
+
+   PyObject* SetTypePinning( PyObject*, PyObject* args )
+   {
+      PyRootClass* derived = nullptr, *base = nullptr;
+      if ( ! PyArg_ParseTuple( args, const_cast< char* >( "O!O!" ),
+                               &PyRootType_Type, &derived,
+                               &PyRootType_Type, &base ) )
+         return nullptr;
+      gPinnedTypes.push_back( std::make_pair( derived->fCppType, base->fCppType ) );
+
+      Py_RETURN_NONE;
+   }
+
+////////////////////////////////////////////////////////////////////////////////
+/// Add an exception to the type pinning for objects of type `derived'.
+
+   PyObject* IgnoreTypePinning( PyObject*, PyObject* args )
+   {
+      PyRootClass* derived = nullptr;
+      if ( ! PyArg_ParseTuple( args, const_cast< char* >( "O!" ),
+                               &PyRootType_Type, &derived ) )
+         return nullptr;
+      gIgnorePinnings.push_back( derived->fCppType );
+
+      Py_RETURN_NONE;
+   }
+
+////////////////////////////////////////////////////////////////////////////////
+/// Cast `obj' to type `type'.
+
+   PyObject* Cast( PyObject*, PyObject* args )
+   {
+      ObjectProxy* obj = nullptr;
+      PyRootClass* type = nullptr;
+      if ( ! PyArg_ParseTuple( args, const_cast< char* >( "O!O!" ),
+                               &ObjectProxy_Type, &obj,
+                               &PyRootType_Type, &type ) )
+         return nullptr;
+      // TODO: this misses an offset calculation, and reference type must not
+      // be cast ...
+      return BindCppObjectNoCast( obj->GetObject(), type->fCppType,
+                                  obj->fFlags & ObjectProxy::kIsReference );
+   }
+
 } // unnamed namespace
 
 
 //- data -----------------------------------------------------------------------
 static PyMethodDef gPyROOTMethods[] = {
-   { (char*) "MakeRootClass", (PyCFunction)PyROOT::MakeRootClass,
+   { (char*) "CreateScopeProxy", (PyCFunction)PyROOT::CreateScopeProxy,
      METH_VARARGS, (char*) "PyROOT internal function" },
-   { (char*) "GetRootGlobal", (PyCFunction)PyROOT::GetRootGlobal,
+   { (char*) "GetCppGlobal", (PyCFunction)PyROOT::GetCppGlobal,
      METH_VARARGS, (char*) "PyROOT internal function" },
-   { (char*) "LookupRootEntity", (PyCFunction)LookupRootEntity,
+   { (char*) "LookupCppEntity", (PyCFunction)LookupCppEntity,
      METH_VARARGS, (char*) "PyROOT internal function" },
    { (char*) "SetRootLazyLookup", (PyCFunction)SetRootLazyLookup,
      METH_VARARGS, (char*) "PyROOT internal function" },
@@ -633,10 +784,18 @@ static PyMethodDef gPyROOTMethods[] = {
      METH_VARARGS, (char*) "Trap signals in safe mode to prevent interpreter abort" },
    { (char*) "SetOwnership", (PyCFunction)SetOwnership,
      METH_VARARGS, (char*) "Modify held C++ object ownership" },
+   { (char*) "AddSmartPtrType", (PyCFunction)AddSmartPtrType,
+     METH_VARARGS, (char*) "Add a smart pointer to the list of known smart pointer types" },
    { (char*) "InstallGUIEventInputHook", (PyCFunction)PyROOT::Utility::InstallGUIEventInputHook,
      METH_NOARGS, (char*) "Install input hook to sent GUI events" },
    { (char*) "RemoveGUIEventInputHook", (PyCFunction)PyROOT::Utility::RemoveGUIEventInputHook,
      METH_NOARGS, (char*) "Remove input hook to sent GUI events" },
+   { (char*) "SetTypePinning", (PyCFunction)SetTypePinning,
+     METH_VARARGS, (char*) "Install a type pinning" },
+   { (char*) "IgnoreTypePinning", (PyCFunction)IgnoreTypePinning,
+     METH_VARARGS, (char*) "Don't pin the given type" },
+   { (char*) "Cast", (PyCFunction)Cast,
+     METH_VARARGS, (char*) "Cast the given object to the given type" },
    { NULL, NULL, 0, NULL }
 };
 
@@ -673,7 +832,9 @@ static struct PyModuleDef moduledef = {
    NULL
 };
 
-//____________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Initialization of extension module libPyROOT.
+
 #define PYROOT_INIT_ERROR return NULL
 extern "C" PyObject* PyInit_libPyROOT()
 #else
@@ -681,7 +842,6 @@ extern "C" PyObject* PyInit_libPyROOT()
 extern "C" void initlibPyROOT()
 #endif
 {
-// Initialization of extension module libPyROOT.
    using namespace PyROOT;
 
 // load commonly used python strings
@@ -708,6 +868,15 @@ extern "C" void initlibPyROOT()
 
 // keep gRootModule, but do not increase its reference count even as it is borrowed,
 // or a self-referencing cycle would be created
+
+// Pythonizations ...
+   PyObject* userPythonizations = PyDict_New();
+   PyObject* gblList = PyList_New( 0 );
+   PyDict_SetItemString( userPythonizations, "__global__", gblList );
+   Py_DECREF( gblList );
+   PyModule_AddObject( gRootModule, "UserPythonizations", userPythonizations );
+   PyModule_AddObject( gRootModule, "UserExceptions",     PyDict_New() );
+   PyModule_AddObject( gRootModule, "PythonizationScope", PyROOT_PyUnicode_FromString( "__global__" ) );
 
 // inject meta type
    if ( ! Utility::InitProxy( gRootModule, &PyRootType_Type, "PyRootType" ) )
@@ -751,19 +920,23 @@ extern "C" void initlibPyROOT()
    PyModule_AddObject( gRootModule, (char*)"nullptr", gNullPtrObject );
 
 // policy labels
-   PyModule_AddObject( gRootModule, (char*)"kMemoryHeuristics", PyInt_FromLong( 1l ) );
-   PyModule_AddObject( gRootModule, (char*)"kMemoryStrict",     PyInt_FromLong( 2l ) );
-   PyModule_AddObject( gRootModule, (char*)"kSignalFast",       PyInt_FromLong( 1l ) );
-   PyModule_AddObject( gRootModule, (char*)"kSignalSafe",       PyInt_FromLong( 2l ) );
+   PyModule_AddObject( gRootModule, (char*)"kMemoryHeuristics",
+      PyInt_FromLong( (int)TCallContext::kUseHeuristics ) );
+   PyModule_AddObject( gRootModule, (char*)"kMemoryStrict",
+      PyInt_FromLong( (int)TCallContext::kUseStrict ) );
+   PyModule_AddObject( gRootModule, (char*)"kSignalFast",
+      PyInt_FromLong( (int)TCallContext::kFast ) );
+   PyModule_AddObject( gRootModule, (char*)"kSignalSafe",
+      PyInt_FromLong( (int)TCallContext::kSafe ) );
 
 // setup ROOT
    PyROOT::InitRoot();
 
 // signal policy: don't abort interpreter in interactive mode
-   Utility::SetSignalPolicy( gROOT->IsBatch() ? Utility::kFast : Utility::kSafe );
+   TCallContext::SetSignalPolicy( gROOT->IsBatch() ? TCallContext::kFast : TCallContext::kSafe );
 
 // inject ROOT namespace for convenience
-   PyModule_AddObject( gRootModule, (char*)"ROOT", MakeRootClassFromString( "ROOT" ) );
+   PyModule_AddObject( gRootModule, (char*)"ROOT", CreateScopeProxy( "ROOT" ) );
 
 #if PY_VERSION_HEX >= 0x03000000
    Py_INCREF( gRootModule );

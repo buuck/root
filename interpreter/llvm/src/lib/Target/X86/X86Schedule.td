@@ -63,12 +63,13 @@ def WriteZero : SchedWrite;
 defm WriteJump : X86SchedWritePair;
 
 // Floating point. This covers both scalar and vector operations.
-defm WriteFAdd  : X86SchedWritePair; // Floating point add/sub/compare.
-defm WriteFMul  : X86SchedWritePair; // Floating point multiplication.
-defm WriteFDiv  : X86SchedWritePair; // Floating point division.
-defm WriteFSqrt : X86SchedWritePair; // Floating point square root.
-defm WriteFRcp  : X86SchedWritePair; // Floating point reciprocal.
-defm WriteFMA   : X86SchedWritePair; // Fused Multiply Add.
+defm WriteFAdd   : X86SchedWritePair; // Floating point add/sub/compare.
+defm WriteFMul   : X86SchedWritePair; // Floating point multiplication.
+defm WriteFDiv   : X86SchedWritePair; // Floating point division.
+defm WriteFSqrt  : X86SchedWritePair; // Floating point square root.
+defm WriteFRcp   : X86SchedWritePair; // Floating point reciprocal estimate.
+defm WriteFRsqrt : X86SchedWritePair; // Floating point reciprocal square root estimate.
+defm WriteFMA    : X86SchedWritePair; // Fused Multiply Add.
 defm WriteFShuffle  : X86SchedWritePair; // Floating point vector shuffles.
 defm WriteFBlend  : X86SchedWritePair; // Floating point vector blends.
 defm WriteFVarBlend  : X86SchedWritePair; // Fp vector variable blends.
@@ -314,6 +315,11 @@ def IIC_SSE_SQRTPD_RM : InstrItinClass;
 def IIC_SSE_SQRTSD_RR : InstrItinClass;
 def IIC_SSE_SQRTSD_RM : InstrItinClass;
 
+def IIC_SSE_RSQRTPS_RR : InstrItinClass;
+def IIC_SSE_RSQRTPS_RM : InstrItinClass;
+def IIC_SSE_RSQRTSS_RR : InstrItinClass;
+def IIC_SSE_RSQRTSS_RM : InstrItinClass;
+
 def IIC_SSE_RCPP_RR : InstrItinClass;
 def IIC_SSE_RCPP_RM : InstrItinClass;
 def IIC_SSE_RCPS_RR : InstrItinClass;
@@ -358,6 +364,8 @@ def IIC_SSE_PALIGNRR : InstrItinClass;
 def IIC_SSE_PALIGNRM : InstrItinClass;
 def IIC_SSE_MWAIT : InstrItinClass;
 def IIC_SSE_MONITOR : InstrItinClass;
+def IIC_SSE_MWAITX : InstrItinClass;
+def IIC_SSE_MONITORX : InstrItinClass;
 
 def IIC_SSE_PREFETCH : InstrItinClass;
 def IIC_SSE_PAUSE : InstrItinClass;
@@ -627,16 +635,27 @@ def IIC_NOP : InstrItinClass;
 // latencies. Since these latencies are not used for pipeline hazards,
 // they do not need to be exact.
 //
-// The GenericModel contains no instruction itineraries.
-def GenericModel : SchedMachineModel {
+// The GenericX86Model contains no instruction itineraries
+// and disables PostRAScheduler.
+class GenericX86Model : SchedMachineModel {
   let IssueWidth = 4;
   let MicroOpBufferSize = 32;
   let LoadLatency = 4;
   let HighLatency = 10;
   let PostRAScheduler = 0;
+  let CompleteModel = 0;
+}
+
+def GenericModel : GenericX86Model;
+
+// Define a model with the PostRAScheduler enabled.
+def GenericPostRAModel : GenericX86Model {
+  let PostRAScheduler = 1;
 }
 
 include "X86ScheduleAtom.td"
 include "X86SchedSandyBridge.td"
 include "X86SchedHaswell.td"
 include "X86ScheduleSLM.td"
+include "X86ScheduleBtVer2.td"
+

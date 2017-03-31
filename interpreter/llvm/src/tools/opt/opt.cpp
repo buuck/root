@@ -20,11 +20,15 @@
 #include "llvm/Analysis/CallGraphSCCPass.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/RegionPass.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Bitcode/BitcodeWriterPass.h"
 #include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/LegacyPassNameParser.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
@@ -33,9 +37,9 @@
 #include "llvm/LinkAllIR.h"
 #include "llvm/LinkAllPasses.h"
 #include "llvm/MC/SubtargetFeature.h"
-#include "llvm/PassManager.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Host.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/PluginLoader.h"
 #include "llvm/Support/PrettyStackTrace.h"
@@ -45,9 +49,9 @@
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/ToolOutputFile.h"
-#include "llvm/Target/TargetLibraryInfo.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 #include <algorithm>
 #include <memory>
 using namespace llvm;
@@ -92,10 +96,14 @@ static cl::opt<bool>
 OutputAssembly("S", cl::desc("Write output as LLVM assembly"));
 
 static cl::opt<bool>
-NoVerify("disable-verify", cl::desc("Do not verify result module"), cl::Hidden);
+NoVerify("disable-verify", cl::desc("Do not run the verifier"), cl::Hidden);
 
 static cl::opt<bool>
 VerifyEach("verify-each", cl::desc("Verify after each transform"));
+
+static cl::opt<bool>
+    DisableDITypeMap("disable-debug-info-type-map",
+                     cl::desc("Don't use a uniquing type map for debug info"));
 
 static cl::opt<bool>
 StripDebug("strip-debug",
@@ -107,14 +115,6 @@ DisableInline("disable-inlining", cl::desc("Do not run the inliner pass"));
 static cl::opt<bool>
 DisableOptimizations("disable-opt",
                      cl::desc("Do not run any optimization passes"));
-
-static cl::opt<bool>
-DisableInternalize("disable-internalize",
-                   cl::desc("Do not mark all symbols as internal"));
-
-static cl::opt<bool>
-StandardCompileOpts("std-compile-opts",
-                   cl::desc("Include the standard compile time optimizations"));
 
 static cl::opt<bool>
 StandardLinkOpts("std-link-opts",
@@ -140,12 +140,16 @@ static cl::opt<bool>
 OptLevelO3("O3",
            cl::desc("Optimization level 3. Similar to clang -O3"));
 
+static cl::opt<unsigned>
+CodeGenOptLevel("codegen-opt-level",
+                cl::desc("Override optimization level for codegen hooks"));
+
 static cl::opt<std::string>
 TargetTriple("mtriple", cl::desc("Override target triple for module"));
 
 static cl::opt<bool>
 UnitAtATime("funit-at-a-time",
-            cl::desc("Enable IPO. This is same as llvm-gcc's -funit-at-a-time"),
+            cl::desc("Enable IPO. This corresponds to gcc's -funit-at-a-time"),
             cl::init(true));
 
 static cl::opt<bool>
@@ -162,6 +166,12 @@ DisableSLPVectorization("disable-slp-vectorization",
                         cl::desc("Disable the slp vectorization pass"),
                         cl::init(false));
 
+static cl::opt<bool> EmitSummaryIndex("module-summary",
+                                      cl::desc("Emit module summary index"),
+                                      cl::init(false));
+
+static cl::opt<bool> EmitModuleHash("module-hash", cl::desc("Emit module hash"),
+                                    cl::init(false));
 
 static cl::opt<bool>
 DisableSimplifyLibCalls("disable-simplify-libcalls",
@@ -185,28 +195,45 @@ DefaultDataLayout("default-data-layout",
           cl::desc("data layout string to use if not specified by module"),
           cl::value_desc("layout-string"), cl::init(""));
 
+static cl::opt<bool> PreserveBitcodeUseListOrder(
+    "preserve-bc-uselistorder",
+    cl::desc("Preserve use-list order when writing LLVM bitcode."),
+    cl::init(true), cl::Hidden);
 
+static cl::opt<bool> PreserveAssemblyUseListOrder(
+    "preserve-ll-uselistorder",
+    cl::desc("Preserve use-list order when writing LLVM assembly."),
+    cl::init(false), cl::Hidden);
 
-static inline void addPass(PassManagerBase &PM, Pass *P) {
+static cl::opt<bool>
+    RunTwice("run-twice",
+             cl::desc("Run all passes twice, re-using the same pass manager."),
+             cl::init(false), cl::Hidden);
+
+static cl::opt<bool> DiscardValueNames(
+    "discard-value-names",
+    cl::desc("Discard names from Value (other than GlobalValue)."),
+    cl::init(false), cl::Hidden);
+
+static inline void addPass(legacy::PassManagerBase &PM, Pass *P) {
   // Add the pass to the pass manager...
   PM.add(P);
 
   // If we are verifying all of the intermediate steps, add the verifier...
-  if (VerifyEach) {
+  if (VerifyEach)
     PM.add(createVerifierPass());
-    PM.add(createDebugInfoVerifierPass());
-  }
 }
 
-/// AddOptimizationPasses - This routine adds optimization passes
-/// based on selected optimization level, OptLevel. This routine
-/// duplicates llvm-gcc behaviour.
+/// This routine adds optimization passes based on selected optimization level,
+/// OptLevel.
 ///
 /// OptLevel - Optimization Level
-static void AddOptimizationPasses(PassManagerBase &MPM,FunctionPassManager &FPM,
-                                  unsigned OptLevel, unsigned SizeLevel) {
-  FPM.add(createVerifierPass());          // Verify that input is correct
-  MPM.add(createDebugInfoVerifierPass()); // Verify that debug info is correct
+static void AddOptimizationPasses(legacy::PassManagerBase &MPM,
+                                  legacy::FunctionPassManager &FPM,
+                                  TargetMachine *TM, unsigned OptLevel,
+                                  unsigned SizeLevel) {
+  if (!NoVerify || VerifyEach)
+    FPM.add(createVerifierPass()); // Verify that input is correct
 
   PassManagerBuilder Builder;
   Builder.OptLevel = OptLevel;
@@ -234,52 +261,36 @@ static void AddOptimizationPasses(PassManagerBase &MPM,FunctionPassManager &FPM,
   Builder.SLPVectorize =
       DisableSLPVectorization ? false : OptLevel > 1 && SizeLevel < 2;
 
+  // Add target-specific passes that need to run as early as possible.
+  if (TM)
+    Builder.addExtension(
+        PassManagerBuilder::EP_EarlyAsPossible,
+        [&](const PassManagerBuilder &, legacy::PassManagerBase &PM) {
+          TM->addEarlyAsPossiblePasses(PM);
+        });
+
   Builder.populateFunctionPassManager(FPM);
   Builder.populateModulePassManager(MPM);
 }
 
-static void AddStandardCompilePasses(PassManagerBase &PM) {
-  PM.add(createVerifierPass());                  // Verify that input is correct
-
-  // If the -strip-debug command line option was specified, do it.
-  if (StripDebug)
-    addPass(PM, createStripSymbolsPass(true));
-
-  // Verify debug info only after it's (possibly) stripped.
-  PM.add(createDebugInfoVerifierPass());
-
-  if (DisableOptimizations) return;
-
-  // -std-compile-opts adds the same module passes as -O3.
+static void AddStandardLinkPasses(legacy::PassManagerBase &PM) {
   PassManagerBuilder Builder;
+  Builder.VerifyInput = true;
+  if (DisableOptimizations)
+    Builder.OptLevel = 0;
+
   if (!DisableInline)
     Builder.Inliner = createFunctionInliningPass();
-  Builder.OptLevel = 3;
-  Builder.populateModulePassManager(PM);
-}
-
-static void AddStandardLinkPasses(PassManagerBase &PM) {
-  PM.add(createVerifierPass());                  // Verify that input is correct
-
-  // If the -strip-debug command line option was specified, do it.
-  if (StripDebug)
-    addPass(PM, createStripSymbolsPass(true));
-
-  // Verify debug info only after it's (possibly) stripped.
-  PM.add(createDebugInfoVerifierPass());
-
-  if (DisableOptimizations) return;
-
-  PassManagerBuilder Builder;
-  Builder.populateLTOPassManager(PM, /*Internalize=*/ !DisableInternalize,
-                                 /*RunInliner=*/ !DisableInline);
+  Builder.populateLTOPassManager(PM);
 }
 
 //===----------------------------------------------------------------------===//
 // CodeGen-related helper functions.
 //
 
-CodeGenOpt::Level GetCodeGenOptLevel() {
+static CodeGenOpt::Level GetCodeGenOptLevel() {
+  if (CodeGenOptLevel.getNumOccurrences())
+    return static_cast<CodeGenOpt::Level>(unsigned(CodeGenOptLevel));
   if (OptLevelO1)
     return CodeGenOpt::Less;
   if (OptLevelO2)
@@ -290,7 +301,9 @@ CodeGenOpt::Level GetCodeGenOptLevel() {
 }
 
 // Returns the TargetMachine instance or zero if no triple is provided.
-static TargetMachine* GetTargetMachine(Triple TheTriple) {
+static TargetMachine* GetTargetMachine(Triple TheTriple, StringRef CPUStr,
+                                       StringRef FeaturesStr,
+                                       const TargetOptions &Options) {
   std::string Error;
   const Target *TheTarget = TargetRegistry::lookupTarget(MArch, TheTriple,
                                                          Error);
@@ -299,20 +312,9 @@ static TargetMachine* GetTargetMachine(Triple TheTriple) {
     return nullptr;
   }
 
-  // Package up features to be passed to target/subtarget
-  std::string FeaturesStr;
-  if (MAttrs.size()) {
-    SubtargetFeatures Features;
-    for (unsigned i = 0; i != MAttrs.size(); ++i)
-      Features.AddFeature(MAttrs[i]);
-    FeaturesStr = Features.getString();
-  }
-
-  return TheTarget->createTargetMachine(TheTriple.getTriple(),
-                                        MCPU, FeaturesStr,
-                                        InitTargetOptionsFromCodeGenFlags(),
-                                        RelocModel, CMModel,
-                                        GetCodeGenOptLevel());
+  return TheTarget->createTargetMachine(TheTriple.getTriple(), CPUStr,
+                                        FeaturesStr, Options, getRelocModel(),
+                                        CMModel, GetCodeGenOptLevel());
 }
 
 #ifdef LINK_POLLY_INTO_TOOLS
@@ -325,14 +327,14 @@ void initializePollyPasses(llvm::PassRegistry &Registry);
 // main for opt
 //
 int main(int argc, char **argv) {
-  sys::PrintStackTraceOnErrorSignal();
+  sys::PrintStackTraceOnErrorSignal(argv[0]);
   llvm::PrettyStackTraceProgram X(argc, argv);
 
   // Enable debug stream buffering.
   EnableDebugBuffering = true;
 
   llvm_shutdown_obj Y;  // Call llvm_shutdown() on exit.
-  LLVMContext &Context = getGlobalContext();
+  LLVMContext Context;
 
   InitializeAllTargets();
   InitializeAllTargetMCs();
@@ -341,13 +343,11 @@ int main(int argc, char **argv) {
   // Initialize passes
   PassRegistry &Registry = *PassRegistry::getPassRegistry();
   initializeCore(Registry);
-  initializeDebugIRPass(Registry);
   initializeScalarOpts(Registry);
   initializeObjCARCOpts(Registry);
   initializeVectorization(Registry);
   initializeIPO(Registry);
   initializeAnalysis(Registry);
-  initializeIPA(Registry);
   initializeTransformUtils(Registry);
   initializeInstCombine(Registry);
   initializeInstrumentation(Registry);
@@ -355,7 +355,15 @@ int main(int argc, char **argv) {
   // For codegen passes, only passes that do IR to IR transformation are
   // supported.
   initializeCodeGenPreparePass(Registry);
-  initializeAtomicExpandLoadLinkedPass(Registry);
+  initializeAtomicExpandPass(Registry);
+  initializeRewriteSymbolsPass(Registry);
+  initializeWinEHPreparePass(Registry);
+  initializeDwarfEHPreparePass(Registry);
+  initializeSafeStackPass(Registry);
+  initializeSjLjEHPreparePass(Registry);
+  initializePreISelIntrinsicLoweringLegacyPassPass(Registry);
+  initializeGlobalMergePass(Registry);
+  initializeInterleavedAccessPass(Registry);
 
 #ifdef LINK_POLLY_INTO_TOOLS
   polly::initializePollyPasses(Registry);
@@ -371,12 +379,28 @@ int main(int argc, char **argv) {
 
   SMDiagnostic Err;
 
-  // Load the input module...
-  std::unique_ptr<Module> M;
-  M.reset(ParseIRFile(InputFilename, Err, Context));
+  Context.setDiscardValueNames(DiscardValueNames);
+  if (!DisableDITypeMap)
+    Context.enableDebugTypeODRUniquing();
 
-  if (!M.get()) {
+  // Load the input module...
+  std::unique_ptr<Module> M = parseIRFile(InputFilename, Err, Context);
+
+  if (!M) {
     Err.print(argv[0], errs());
+    return 1;
+  }
+
+  // Strip debug info before running the verifier.
+  if (StripDebug)
+    StripDebugInfo(*M);
+
+  // Immediately run the verifier to catch any problems before starting up the
+  // pass pipelines.  Otherwise we can crash on broken code during
+  // doInitialization().
+  if (!NoVerify && verifyModule(*M, &errs())) {
+    errs() << argv[0] << ": " << InputFilename
+           << ": error: input module is broken!\n";
     return 1;
   }
 
@@ -395,14 +419,30 @@ int main(int argc, char **argv) {
     if (OutputFilename.empty())
       OutputFilename = "-";
 
-    std::string ErrorInfo;
-    Out.reset(new tool_output_file(OutputFilename.c_str(), ErrorInfo,
-                                   sys::fs::F_None));
-    if (!ErrorInfo.empty()) {
-      errs() << ErrorInfo << '\n';
+    std::error_code EC;
+    Out.reset(new tool_output_file(OutputFilename, EC, sys::fs::F_None));
+    if (EC) {
+      errs() << EC.message() << '\n';
       return 1;
     }
   }
+
+  Triple ModuleTriple(M->getTargetTriple());
+  std::string CPUStr, FeaturesStr;
+  TargetMachine *Machine = nullptr;
+  const TargetOptions Options = InitTargetOptionsFromCodeGenFlags();
+
+  if (ModuleTriple.getArch()) {
+    CPUStr = getCPUStr();
+    FeaturesStr = getFeaturesStr();
+    Machine = GetTargetMachine(ModuleTriple, CPUStr, FeaturesStr, Options);
+  }
+
+  std::unique_ptr<TargetMachine> TM(Machine);
+
+  // Override function attributes based on CPUStr, FeaturesStr, and command line
+  // flags.
+  setFunctionAttributes(CPUStr, FeaturesStr, *M);
 
   // If the output is set to be emitted to standard out, and standard out is a
   // console, print out a warning message and refuse to do it.  We don't
@@ -425,8 +465,9 @@ int main(int argc, char **argv) {
     // The user has asked to use the new pass manager and provided a pipeline
     // string. Hand off the rest of the functionality to the new code for that
     // layer.
-    return runPassPipeline(argv[0], Context, *M.get(), Out.get(), PassPipeline,
-                           OK, VK)
+    return runPassPipeline(argv[0], Context, *M, TM.get(), Out.get(),
+                           PassPipeline, OK, VK, PreserveAssemblyUseListOrder,
+                           PreserveBitcodeUseListOrder)
                ? 0
                : 1;
   }
@@ -434,44 +475,31 @@ int main(int argc, char **argv) {
   // Create a PassManager to hold and optimize the collection of passes we are
   // about to build.
   //
-  PassManager Passes;
+  legacy::PassManager Passes;
 
   // Add an appropriate TargetLibraryInfo pass for the module's triple.
-  TargetLibraryInfo *TLI = new TargetLibraryInfo(Triple(M->getTargetTriple()));
+  TargetLibraryInfoImpl TLII(ModuleTriple);
 
   // The -disable-simplify-libcalls flag actually disables all builtin optzns.
   if (DisableSimplifyLibCalls)
-    TLI->disableAllFunctions();
-  Passes.add(TLI);
+    TLII.disableAllFunctions();
+  Passes.add(new TargetLibraryInfoWrapperPass(TLII));
 
   // Add an appropriate DataLayout instance for this module.
-  const DataLayout *DL = M.get()->getDataLayout();
-  if (!DL && !DefaultDataLayout.empty()) {
+  const DataLayout &DL = M->getDataLayout();
+  if (DL.isDefault() && !DefaultDataLayout.empty()) {
     M->setDataLayout(DefaultDataLayout);
-    DL = M.get()->getDataLayout();
   }
 
-  if (DL)
-    Passes.add(new DataLayoutPass(M.get()));
-
-  Triple ModuleTriple(M->getTargetTriple());
-  TargetMachine *Machine = nullptr;
-  if (ModuleTriple.getArch())
-    Machine = GetTargetMachine(Triple(ModuleTriple));
-  std::unique_ptr<TargetMachine> TM(Machine);
-
   // Add internal analysis passes from the target machine.
-  if (TM.get())
-    TM->addAnalysisPasses(Passes);
+  Passes.add(createTargetTransformInfoWrapperPass(TM ? TM->getTargetIRAnalysis()
+                                                     : TargetIRAnalysis()));
 
-  std::unique_ptr<FunctionPassManager> FPasses;
+  std::unique_ptr<legacy::FunctionPassManager> FPasses;
   if (OptLevelO1 || OptLevelO2 || OptLevelOs || OptLevelOz || OptLevelO3) {
-    FPasses.reset(new FunctionPassManager(M.get()));
-    if (DL)
-      FPasses->add(new DataLayoutPass(M.get()));
-    if (TM.get())
-      TM->addAnalysisPasses(*FPasses);
-
+    FPasses.reset(new legacy::FunctionPassManager(M.get()));
+    FPasses->add(createTargetTransformInfoWrapperPass(
+        TM ? TM->getTargetIRAnalysis() : TargetIRAnalysis()));
   }
 
   if (PrintBreakpoints) {
@@ -480,11 +508,11 @@ int main(int argc, char **argv) {
       if (OutputFilename.empty())
         OutputFilename = "-";
 
-      std::string ErrorInfo;
-      Out.reset(new tool_output_file(OutputFilename.c_str(), ErrorInfo,
-                                     sys::fs::F_None));
-      if (!ErrorInfo.empty()) {
-        errs() << ErrorInfo << '\n';
+      std::error_code EC;
+      Out = llvm::make_unique<tool_output_file>(OutputFilename, EC,
+                                                sys::fs::F_None);
+      if (EC) {
+        errs() << EC.message() << '\n';
         return 1;
       }
     }
@@ -492,21 +520,8 @@ int main(int argc, char **argv) {
     NoOutput = true;
   }
 
-  // If the -strip-debug command line option was specified, add it.  If
-  // -std-compile-opts was also specified, it will handle StripDebug.
-  if (StripDebug && !StandardCompileOpts)
-    addPass(Passes, createStripSymbolsPass(true));
-
   // Create a new optimization pass for each one specified on the command line
   for (unsigned i = 0; i < PassList.size(); ++i) {
-    // Check to see if -std-compile-opts was specified before this option.  If
-    // so, handle it.
-    if (StandardCompileOpts &&
-        StandardCompileOpts.getPosition() < PassList.getPosition(i)) {
-      AddStandardCompilePasses(Passes);
-      StandardCompileOpts = false;
-    }
-
     if (StandardLinkOpts &&
         StandardLinkOpts.getPosition() < PassList.getPosition(i)) {
       AddStandardLinkPasses(Passes);
@@ -514,27 +529,27 @@ int main(int argc, char **argv) {
     }
 
     if (OptLevelO1 && OptLevelO1.getPosition() < PassList.getPosition(i)) {
-      AddOptimizationPasses(Passes, *FPasses, 1, 0);
+      AddOptimizationPasses(Passes, *FPasses, TM.get(), 1, 0);
       OptLevelO1 = false;
     }
 
     if (OptLevelO2 && OptLevelO2.getPosition() < PassList.getPosition(i)) {
-      AddOptimizationPasses(Passes, *FPasses, 2, 0);
+      AddOptimizationPasses(Passes, *FPasses, TM.get(), 2, 0);
       OptLevelO2 = false;
     }
 
     if (OptLevelOs && OptLevelOs.getPosition() < PassList.getPosition(i)) {
-      AddOptimizationPasses(Passes, *FPasses, 2, 1);
+      AddOptimizationPasses(Passes, *FPasses, TM.get(), 2, 1);
       OptLevelOs = false;
     }
 
     if (OptLevelOz && OptLevelOz.getPosition() < PassList.getPosition(i)) {
-      AddOptimizationPasses(Passes, *FPasses, 2, 2);
+      AddOptimizationPasses(Passes, *FPasses, TM.get(), 2, 2);
       OptLevelOz = false;
     }
 
     if (OptLevelO3 && OptLevelO3.getPosition() < PassList.getPosition(i)) {
-      AddOptimizationPasses(Passes, *FPasses, 3, 0);
+      AddOptimizationPasses(Passes, *FPasses, TM.get(), 3, 0);
       OptLevelO3 = false;
     }
 
@@ -576,13 +591,8 @@ int main(int argc, char **argv) {
     }
 
     if (PrintEachXForm)
-      Passes.add(createPrintModulePass(errs()));
-  }
-
-  // If -std-compile-opts was specified at the end of the pass list, add them.
-  if (StandardCompileOpts) {
-    AddStandardCompilePasses(Passes);
-    StandardCompileOpts = false;
+      Passes.add(
+          createPrintModulePass(errs(), "", PreserveAssemblyUseListOrder));
   }
 
   if (StandardLinkOpts) {
@@ -591,46 +601,90 @@ int main(int argc, char **argv) {
   }
 
   if (OptLevelO1)
-    AddOptimizationPasses(Passes, *FPasses, 1, 0);
+    AddOptimizationPasses(Passes, *FPasses, TM.get(), 1, 0);
 
   if (OptLevelO2)
-    AddOptimizationPasses(Passes, *FPasses, 2, 0);
+    AddOptimizationPasses(Passes, *FPasses, TM.get(), 2, 0);
 
   if (OptLevelOs)
-    AddOptimizationPasses(Passes, *FPasses, 2, 1);
+    AddOptimizationPasses(Passes, *FPasses, TM.get(), 2, 1);
 
   if (OptLevelOz)
-    AddOptimizationPasses(Passes, *FPasses, 2, 2);
+    AddOptimizationPasses(Passes, *FPasses, TM.get(), 2, 2);
 
   if (OptLevelO3)
-    AddOptimizationPasses(Passes, *FPasses, 3, 0);
+    AddOptimizationPasses(Passes, *FPasses, TM.get(), 3, 0);
 
-  if (OptLevelO1 || OptLevelO2 || OptLevelOs || OptLevelOz || OptLevelO3) {
+  if (FPasses) {
     FPasses->doInitialization();
-    for (Module::iterator F = M->begin(), E = M->end(); F != E; ++F)
-      FPasses->run(*F);
+    for (Function &F : *M)
+      FPasses->run(F);
     FPasses->doFinalization();
   }
 
   // Check that the module is well formed on completion of optimization
-  if (!NoVerify && !VerifyEach) {
+  if (!NoVerify && !VerifyEach)
     Passes.add(createVerifierPass());
-    Passes.add(createDebugInfoVerifierPass());
-  }
+
+  // In run twice mode, we want to make sure the output is bit-by-bit
+  // equivalent if we run the pass manager again, so setup two buffers and
+  // a stream to write to them. Note that llc does something similar and it
+  // may be worth to abstract this out in the future.
+  SmallVector<char, 0> Buffer;
+  SmallVector<char, 0> CompileTwiceBuffer;
+  std::unique_ptr<raw_svector_ostream> BOS;
+  raw_ostream *OS = nullptr;
 
   // Write bitcode or assembly to the output as the last step...
   if (!NoOutput && !AnalyzeOnly) {
-    if (OutputAssembly)
-      Passes.add(createPrintModulePass(Out->os()));
-    else
-      Passes.add(createBitcodeWriterPass(Out->os()));
+    assert(Out);
+    OS = &Out->os();
+    if (RunTwice) {
+      BOS = make_unique<raw_svector_ostream>(Buffer);
+      OS = BOS.get();
+    }
+    if (OutputAssembly) {
+      if (EmitSummaryIndex)
+        report_fatal_error("Text output is incompatible with -module-summary");
+      if (EmitModuleHash)
+        report_fatal_error("Text output is incompatible with -module-hash");
+      Passes.add(createPrintModulePass(*OS, "", PreserveAssemblyUseListOrder));
+    } else
+      Passes.add(createBitcodeWriterPass(*OS, PreserveBitcodeUseListOrder,
+                                         EmitSummaryIndex, EmitModuleHash));
   }
 
   // Before executing passes, print the final values of the LLVM options.
   cl::PrintOptionValues();
 
+  // If requested, run all passes again with the same pass manager to catch
+  // bugs caused by persistent state in the passes
+  if (RunTwice) {
+      std::unique_ptr<Module> M2(CloneModule(M.get()));
+      Passes.run(*M2);
+      CompileTwiceBuffer = Buffer;
+      Buffer.clear();
+  }
+
   // Now that we have all of the passes ready, run them.
-  Passes.run(*M.get());
+  Passes.run(*M);
+
+  // Compare the two outputs and make sure they're the same
+  if (RunTwice) {
+    assert(Out);
+    if (Buffer.size() != CompileTwiceBuffer.size() ||
+        (memcmp(Buffer.data(), CompileTwiceBuffer.data(), Buffer.size()) !=
+         0)) {
+      errs() << "Running the pass manager twice changed the output.\n"
+                "Writing the result of the second run to the specified output.\n"
+                "To generate the one-run comparison binary, just run without\n"
+                "the compile-twice option\n";
+      Out->os() << BOS->str();
+      Out->keep();
+      return 1;
+    }
+    Out->os() << BOS->str();
+  }
 
   // Declare success.
   if (!NoOutput || PrintBreakpoints)

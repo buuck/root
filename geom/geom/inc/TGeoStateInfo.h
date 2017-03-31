@@ -12,19 +12,11 @@
 #ifndef ROOT_TGeoStateInfo
 #define ROOT_TGeoStateInfo
 
-#ifndef ROOT_TGeoMatrix
 #include "TGeoMatrix.h"
-#endif
 
 class TGeoNode;
 class TGeoPolygon;
 struct TGeoStateInfo;
-
-////////////////////////////////////////////////////////////////////////////
-//                                                                        //
-// TGeoStateInfo - statefull info for the current geometry level.         //
-//                                                                        //
-////////////////////////////////////////////////////////////////////////////
 
 struct TGeoStateInfo {
    TGeoNode            *fNode;           // Node to which applies
@@ -55,7 +47,7 @@ struct TGeoStateInfo {
    Double_t            *fXtruYc;         // [fNvert] current Y positions for polygon vertices
    TGeoPolygon         *fXtruPoly;       // polygon defining section shape
 
-   TGeoStateInfo();
+   TGeoStateInfo(Int_t maxdaughters=0);
    TGeoStateInfo(const TGeoStateInfo &other);
    TGeoStateInfo & operator=(const TGeoStateInfo &other);
    virtual ~TGeoStateInfo();

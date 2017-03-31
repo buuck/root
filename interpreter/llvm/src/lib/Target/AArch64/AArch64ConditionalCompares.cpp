@@ -18,13 +18,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "AArch64.h"
-#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SparseSet.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/CodeGen/MachineBranchProbabilityInfo.h"
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
@@ -191,8 +188,8 @@ public:
   /// runOnMachineFunction - Initialize per-function data structures.
   void runOnMachineFunction(MachineFunction &MF) {
     this->MF = &MF;
-    TII = MF.getTarget().getInstrInfo();
-    TRI = MF.getTarget().getRegisterInfo();
+    TII = MF.getSubtarget().getInstrInfo();
+    TRI = MF.getSubtarget().getRegisterInfo();
     MRI = &MF.getRegInfo();
   }
 
@@ -351,9 +348,9 @@ MachineInstr *SSACCmpConv::findConvertibleCompare(MachineBasicBlock *MBB) {
 
     // Check for flag reads and clobbers.
     MIOperands::PhysRegInfo PRI =
-        MIOperands(I).analyzePhysReg(AArch64::NZCV, TRI);
+        MIOperands(*I).analyzePhysReg(AArch64::NZCV, TRI);
 
-    if (PRI.Reads) {
+    if (PRI.Read) {
       // The ccmp doesn't produce exactly the same flags as the original
       // compare, so reject the transform if there are uses of the flags
       // besides the terminators.
@@ -362,7 +359,7 @@ MachineInstr *SSACCmpConv::findConvertibleCompare(MachineBasicBlock *MBB) {
       return nullptr;
     }
 
-    if (PRI.Clobbers) {
+    if (PRI.Defined || PRI.Clobbered) {
       DEBUG(dbgs() << "Not convertible compare: " << *I);
       ++NumUnknNZCVDefs;
       return nullptr;
@@ -416,7 +413,7 @@ bool SSACCmpConv::canSpeculateInstrs(MachineBasicBlock *MBB,
 
     // We never speculate stores, so an AA pointer isn't necessary.
     bool DontMoveAcrossStore = true;
-    if (!I.isSafeToMove(TII, nullptr, DontMoveAcrossStore)) {
+    if (!I.isSafeToMove(nullptr, DontMoveAcrossStore)) {
       DEBUG(dbgs() << "Can't speculate: " << I);
       return false;
     }
@@ -567,8 +564,8 @@ void SSACCmpConv::convert(SmallVectorImpl<MachineBasicBlock *> &RemovedBlocks) {
   // All CmpBB instructions are moved into Head, and CmpBB is deleted.
   // Update the CFG first.
   updateTailPHIs();
-  Head->removeSuccessor(CmpBB);
-  CmpBB->removeSuccessor(Tail);
+  Head->removeSuccessor(CmpBB, true);
+  CmpBB->removeSuccessor(Tail, true);
   Head->transferSuccessorsAndUpdatePHIs(CmpBB);
   DebugLoc TermDL = Head->getFirstTerminator()->getDebugLoc();
   TII->RemoveBranch(*Head);
@@ -723,7 +720,7 @@ namespace {
 class AArch64ConditionalCompares : public MachineFunctionPass {
   const TargetInstrInfo *TII;
   const TargetRegisterInfo *TRI;
-  const MCSchedModel *SchedModel;
+  MCSchedModel SchedModel;
   // Does the proceeded function has Oz attribute.
   bool MinSize;
   MachineRegisterInfo *MRI;
@@ -759,7 +756,6 @@ void initializeAArch64ConditionalComparesPass(PassRegistry &);
 
 INITIALIZE_PASS_BEGIN(AArch64ConditionalCompares, "aarch64-ccmp",
                       "AArch64 CCMP Pass", false, false)
-INITIALIZE_PASS_DEPENDENCY(MachineBranchProbabilityInfo)
 INITIALIZE_PASS_DEPENDENCY(MachineDominatorTree)
 INITIALIZE_PASS_DEPENDENCY(MachineTraceMetrics)
 INITIALIZE_PASS_END(AArch64ConditionalCompares, "aarch64-ccmp",
@@ -770,7 +766,6 @@ FunctionPass *llvm::createAArch64ConditionalCompares() {
 }
 
 void AArch64ConditionalCompares::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.addRequired<MachineBranchProbabilityInfo>();
   AU.addRequired<MachineDominatorTree>();
   AU.addPreserved<MachineDominatorTree>();
   AU.addRequired<MachineLoopInfo>();
@@ -786,13 +781,13 @@ void AArch64ConditionalCompares::updateDomTree(
   // convert() removes CmpBB which was previously dominated by Head.
   // CmpBB children should be transferred to Head.
   MachineDomTreeNode *HeadNode = DomTree->getNode(CmpConv.Head);
-  for (unsigned i = 0, e = Removed.size(); i != e; ++i) {
-    MachineDomTreeNode *Node = DomTree->getNode(Removed[i]);
+  for (MachineBasicBlock *RemovedMBB : Removed) {
+    MachineDomTreeNode *Node = DomTree->getNode(RemovedMBB);
     assert(Node != HeadNode && "Cannot erase the head node");
     assert(Node->getIDom() == HeadNode && "CmpBB should be dominated by Head");
     while (Node->getNumChildren())
       DomTree->changeImmediateDominator(Node->getChildren().back(), HeadNode);
-    DomTree->eraseNode(Removed[i]);
+    DomTree->eraseNode(RemovedMBB);
   }
 }
 
@@ -801,8 +796,8 @@ void
 AArch64ConditionalCompares::updateLoops(ArrayRef<MachineBasicBlock *> Removed) {
   if (!Loops)
     return;
-  for (unsigned i = 0, e = Removed.size(); i != e; ++i)
-    Loops->removeBlock(Removed[i]);
+  for (MachineBasicBlock *RemovedMBB : Removed)
+    Loops->removeBlock(RemovedMBB);
 }
 
 /// Invalidate MachineTraceMetrics before if-conversion.
@@ -845,13 +840,13 @@ bool AArch64ConditionalCompares::shouldConvert() {
   // the cost of a misprediction.
   //
   // Set a limit on the delay we will accept.
-  unsigned DelayLimit = SchedModel->MispredictPenalty * 3 / 4;
+  unsigned DelayLimit = SchedModel.MispredictPenalty * 3 / 4;
 
   // Instruction depths can be computed for all trace instructions above CmpBB.
   unsigned HeadDepth =
-      Trace.getInstrCycles(CmpConv.Head->getFirstTerminator()).Depth;
+      Trace.getInstrCycles(*CmpConv.Head->getFirstTerminator()).Depth;
   unsigned CmpBBDepth =
-      Trace.getInstrCycles(CmpConv.CmpBB->getFirstTerminator()).Depth;
+      Trace.getInstrCycles(*CmpConv.CmpBB->getFirstTerminator()).Depth;
   DEBUG(dbgs() << "Head depth:  " << HeadDepth
                << "\nCmpBB depth: " << CmpBBDepth << '\n');
   if (CmpBBDepth > HeadDepth + DelayLimit) {
@@ -891,17 +886,18 @@ bool AArch64ConditionalCompares::tryConvert(MachineBasicBlock *MBB) {
 bool AArch64ConditionalCompares::runOnMachineFunction(MachineFunction &MF) {
   DEBUG(dbgs() << "********** AArch64 Conditional Compares **********\n"
                << "********** Function: " << MF.getName() << '\n');
-  TII = MF.getTarget().getInstrInfo();
-  TRI = MF.getTarget().getRegisterInfo();
-  SchedModel =
-      MF.getTarget().getSubtarget<TargetSubtargetInfo>().getSchedModel();
+  if (skipFunction(*MF.getFunction()))
+    return false;
+
+  TII = MF.getSubtarget().getInstrInfo();
+  TRI = MF.getSubtarget().getRegisterInfo();
+  SchedModel = MF.getSubtarget().getSchedModel();
   MRI = &MF.getRegInfo();
   DomTree = &getAnalysis<MachineDominatorTree>();
   Loops = getAnalysisIfAvailable<MachineLoopInfo>();
   Traces = &getAnalysis<MachineTraceMetrics>();
   MinInstr = nullptr;
-  MinSize = MF.getFunction()->getAttributes().hasAttribute(
-      AttributeSet::FunctionIndex, Attribute::MinSize);
+  MinSize = MF.getFunction()->optForMinSize();
 
   bool Changed = false;
   CmpConv.runOnMachineFunction(MF);

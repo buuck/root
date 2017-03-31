@@ -9,207 +9,200 @@
 
 #include "IncrementalParser.h"
 
+#include "ASTTransformer.h"
 #include "AutoSynthesizer.h"
-#include "BackendPass.h"
+#include "BackendPasses.h"
 #include "CheckEmptyTransactionTransformer.h"
+#include "ClingPragmas.h"
 #include "DeclCollector.h"
 #include "DeclExtractor.h"
 #include "DynamicLookup.h"
+#include "IncrementalExecutor.h"
 #include "NullDerefProtectionTransformer.h"
-#include "ValueExtractionSynthesizer.h"
 #include "TransactionPool.h"
-#include "TransactionUnloader.h"
+#include "ValueExtractionSynthesizer.h"
 #include "ValuePrinterSynthesizer.h"
 #include "cling/Interpreter/CIFactory.h"
 #include "cling/Interpreter/Interpreter.h"
 #include "cling/Interpreter/InterpreterCallbacks.h"
 #include "cling/Interpreter/Transaction.h"
+#include "cling/Utils/Diagnostics.h"
+#include "cling/Utils/Output.h"
 
-#include "clang/AST/Attr.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclGroup.h"
 #include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/CodeGen/ModuleBuilder.h"
-#include "clang/Parse/Parser.h"
-#include "clang/Lex/Preprocessor.h"
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/Lex/Preprocessor.h"
+#include "clang/Parse/Parser.h"
+#include "clang/Sema/Sema.h"
+#include "clang/Sema/SemaDiagnostic.h"
 #include "clang/Serialization/ASTWriter.h"
 
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CrashRecoveryContext.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/raw_os_ostream.h"
 
 #include <iostream>
-#include <stdio.h>
 #include <sstream>
-
-// Include the necessary headers to interface with the Windows registry and
-// environment.
-#ifdef _MSC_VER
-  #define WIN32_LEAN_AND_MEAN
-  #define NOGDI
-  #define NOMINMAX
-  #include <Windows.h>
-  #include <sstream>
-  #define popen _popen
-  #define pclose _pclose
-  #pragma comment(lib, "Advapi32.lib")
-#endif
+#include <stdio.h>
 
 using namespace clang;
 
 namespace {
+
   ///\brief Check the compile-time C++ ABI version vs the run-time ABI version,
   /// a mismatch could cause havoc. Reports if ABI versions differ.
-  static void CheckABICompatibility(clang::CompilerInstance* CI) {
-#ifdef __GLIBCXX__
-# define CLING_CXXABIV __GLIBCXX__
-# define CLING_CXXABIS "__GLIBCXX__"
-#elif _LIBCPP_VERSION
-# define CLING_CXXABIV _LIBCPP_VERSION
-# define CLING_CXXABIS "_LIBCPP_VERSION"
-#elif defined (_MSC_VER)
-    // For MSVC we do not use CLING_CXXABI*
+  static bool CheckABICompatibility(cling::Interpreter& Interp) {
+#if defined(__GLIBCXX__)
+    #define CLING_CXXABI_VERS       std::to_string(__GLIBCXX__)
+    const char* CLING_CXXABI_NAME = "__GLIBCXX__";
+#elif defined(_LIBCPP_VERSION)
+    #define CLING_CXXABI_VERS       std::to_string(_LIBCPP_VERSION)
+    const char* CLING_CXXABI_NAME = "_LIBCPP_VERSION";
+#elif defined(_CRT_MSVCP_CURRENT)
+    #define CLING_CXXABI_VERS        _CRT_MSVCP_CURRENT
+    const char* CLING_CXXABI_NAME = "_CRT_MSVCP_CURRENT";
 #else
-# define CLING_CXXABIV -1 // intentionally invalid macro name
-# define CLING_CXXABIS "-1" // intentionally invalid macro name
-    llvm::errs()
-      << "Warning in cling::CIFactory::createCI():\n  "
-      "C++ ABI check not implemented for this standard library\n";
-    return;
+    #error "Unknown platform for ABI check";
 #endif
-#ifdef _MSC_VER
-    HKEY regVS;
-    int VSVersion = (_MSC_VER / 100) - 6;
-    std::stringstream subKey;
-    subKey << "VisualStudio.DTE." << VSVersion << ".0";
-    if (RegOpenKeyEx(HKEY_CLASSES_ROOT, subKey.str().c_str(), 0, KEY_READ, &regVS) == ERROR_SUCCESS) {
-      RegCloseKey(regVS);
-    }
-    else {
-      llvm::errs()
-        << "Warning in cling::CIFactory::createCI():\n  "
-        "Possible C++ standard library mismatch, compiled with Visual Studio v"
-        << VSVersion << ".0,\n"
-        "but this version of Visual Studio was not found in your system's registry.\n";
-    }
-#else
 
-  struct EarlyReturnWarn {
-    bool shouldWarn = true;
-    ~EarlyReturnWarn() {
-      if (shouldWarn) {
-        llvm::errs()
-          << "Warning in cling::IncrementalParser::CheckABICompatibility():\n  "
-             "Possible C++ standard library mismatch, compiled with "
-             CLING_CXXABIS " v" << CLING_CXXABIV
-          << " but extraction of runtime standard library version failed.\n";
+    const std::string CurABI = Interp.getMacroValue(CLING_CXXABI_NAME);
+    if (CurABI == CLING_CXXABI_VERS)
+      return true;
+
+    cling::errs() <<
+      "Warning in cling::IncrementalParser::CheckABICompatibility():\n"
+      "  Possible C++ standard library mismatch, compiled with "
+      << CLING_CXXABI_NAME << " '" << CLING_CXXABI_VERS << "'\n"
+      "  Extraction of runtime standard library version was: '"
+      << CurABI << "'\n";
+
+    return false;
+  }
+
+  class FilteringDiagConsumer : public cling::utils::DiagnosticsOverride {
+    std::stack<bool> m_IgnorePromptDiags;
+
+    void SyncDiagCountWithTarget() {
+      NumWarnings = m_PrevClient.getNumWarnings();
+      NumErrors = m_PrevClient.getNumErrors();
+    }
+
+    void BeginSourceFile(const LangOptions &LangOpts,
+                         const Preprocessor *PP=nullptr) override {
+      m_PrevClient.BeginSourceFile(LangOpts, PP);
+    }
+
+    void EndSourceFile() override {
+      m_PrevClient.EndSourceFile();
+      SyncDiagCountWithTarget();
+    }
+  
+    void finish() override {
+      m_PrevClient.finish();
+      SyncDiagCountWithTarget();
+    }
+
+    void clear() override {
+      m_PrevClient.clear();
+      SyncDiagCountWithTarget();
+    }
+
+    bool IncludeInDiagnosticCounts() const override {
+      return m_PrevClient.IncludeInDiagnosticCounts();
+    }
+
+    void HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
+                          const Diagnostic &Info) override {
+      if (Ignoring()) {
+        if (Info.getID() == diag::warn_unused_expr
+            || Info.getID() == diag::warn_unused_call
+            || Info.getID() == diag::warn_unused_comparison)
+          return; // ignore!
+        if (Info.getID() == diag::warn_falloff_nonvoid_function) {
+          DiagLevel = DiagnosticsEngine::Error;
+        }
+        if (Info.getID() == diag::ext_return_has_expr) {
+          // An error that we need to suppress.
+          auto Diags = const_cast<DiagnosticsEngine*>(Info.getDiags());
+          assert(Diags->hasErrorOccurred() && "Expected ErrorOccurred");
+          if (m_PrevClient.getNumErrors() == 0) { // first error
+            Diags->Reset(true /*soft - only counts, not mappings*/);
+          } // else we had other errors, too.
+          return; // ignore!
+        }
       }
+      m_PrevClient.HandleDiagnostic(DiagLevel, Info);
+      SyncDiagCountWithTarget();
     }
-  } warnAtReturn;
-  clang::Preprocessor& PP = CI->getPreprocessor();
-  clang::IdentifierInfo* II = PP.getIdentifierInfo(CLING_CXXABIS);
-  if (!II)
-    return;
-  const clang::DefMacroDirective* MD
-    = llvm::dyn_cast<clang::DefMacroDirective>(PP.getMacroDirective(II));
-  if (!MD)
-    return;
-  const clang::MacroInfo* MI = MD->getMacroInfo();
-  if (!MI || MI->getNumTokens() != 1)
-    return;
-  const clang::Token& Tok = *MI->tokens_begin();
-  if (!Tok.isLiteral())
-    return;
-  if (!Tok.getLength())
-    return;
 
-  std::string cxxabivStr;
-  {
-     llvm::raw_string_ostream cxxabivStrStrm(cxxabivStr);
-     cxxabivStrStrm << CLING_CXXABIV;
-  }
-  bool Invalid = false;
-  std::string tokStr = PP.getSpelling(Tok, &Invalid);
-  if (Invalid)
-    return;
+    bool Ignoring() const {
+      return !m_IgnorePromptDiags.empty() && m_IgnorePromptDiags.top();
+    }
 
-  warnAtReturn.shouldWarn = false;
-  if (tokStr != cxxabivStr) {
-    llvm::errs()
-      << "Warning in cling::IncrementalParser::CheckABICompatibility():\n  "
-        "C++ ABI mismatch, compiled with "
-        CLING_CXXABIS " v" << CLING_CXXABIV
-      << " running with v" << tokStr << "\n";
-  }
-#endif
-#undef CLING_CXXABIV
-#undef CLING_CXXABIS
-  }
+  public:
+    FilteringDiagConsumer(DiagnosticsEngine& Diags, bool Own) :
+      DiagnosticsOverride(Diags, Own) {
+    }
+
+    struct RAAI {
+      FilteringDiagConsumer& m_Client;
+      RAAI(DiagnosticConsumer& F, bool Ignore) :
+       m_Client(static_cast<FilteringDiagConsumer&>(F)) {
+        m_Client.m_IgnorePromptDiags.push(Ignore);
+      }
+      ~RAAI() { m_Client.m_IgnorePromptDiags.pop(); }
+    };
+  };
 } // unnamed namespace
 
 namespace cling {
-  IncrementalParser::IncrementalParser(Interpreter* interp,
-                                       int argc, const char* const *argv,
-                                       const char* llvmdir):
-    m_Interpreter(interp), m_Consumer(0) {
+  IncrementalParser::IncrementalParser(Interpreter* interp, const char* llvmdir):
+    m_Interpreter(interp),
+    m_CI(CIFactory::createCI("", interp->getOptions(), llvmdir)),
+    m_Consumer(nullptr), m_ModuleNo(0) {
 
-    CompilerInstance* CI = CIFactory::createCI("", argc, argv, llvmdir);
-    assert(CI && "CompilerInstance is (null)!");
-
-    m_Consumer = dyn_cast<DeclCollector>(&CI->getSema().getASTConsumer());
-    assert(m_Consumer && "Expected ChainedConsumer!");
-
-    m_CI.reset(CI);
-
-    if (CI->getFrontendOpts().ProgramAction != clang::frontend::ParseSyntaxOnly){
-      m_CodeGen.reset(CreateLLVMCodeGen(CI->getDiagnostics(), "cling input",
-                                        CI->getCodeGenOpts(),
-                                        CI->getTargetOpts(),
-                                        *m_Interpreter->getLLVMContext()
-                                        ));
+    if (!m_CI) {
+      cling::errs() << "Compiler instance could not be created.\n";
+      return;
     }
+    // Is the CompilerInstance being used to generate output only?
+    if (m_Interpreter->getOptions().CompilerOpts.HasOutput)
+      return;
+
+    m_Consumer = dyn_cast<DeclCollector>(&m_CI->getSema().getASTConsumer());
+    if (!m_Consumer) {
+      cling::errs() << "No AST consumer available.\n";
+      return;
+    }
+
+    DiagnosticsEngine& Diag = m_CI->getDiagnostics();
+    if (m_CI->getFrontendOpts().ProgramAction != frontend::ParseSyntaxOnly) {
+      m_CodeGen.reset(CreateLLVMCodeGen(
+          Diag, "cling-module-0", m_CI->getHeaderSearchOpts(),
+          m_CI->getPreprocessorOpts(), m_CI->getCodeGenOpts(),
+          *m_Interpreter->getLLVMContext()));
+      m_Consumer->setContext(this, m_CodeGen.get());
+    } else {
+      m_Consumer->setContext(this, 0);
+    }
+
+    m_DiagConsumer.reset(new FilteringDiagConsumer(Diag, false));
 
     initializeVirtualFile();
-
-    // Add transformers to the IncrementalParser, which owns them
-    Sema* TheSema = &CI->getSema();
-    // Register the AST Transformers
-    m_ASTTransformers.push_back(new AutoSynthesizer(TheSema));
-    m_ASTTransformers.push_back(new EvaluateTSynthesizer(TheSema));
-    m_ASTTransformers.push_back(new ValuePrinterSynthesizer(TheSema, 0));
-    m_ASTTransformers.push_back(new DeclExtractor(TheSema));
-    m_ASTTransformers.push_back(new ValueExtractionSynthesizer(TheSema));
-    m_ASTTransformers.push_back(new NullDerefProtectionTransformer(TheSema));
-    m_ASTTransformers.push_back(new CheckEmptyTransactionTransformer(TheSema));
-
-
-#ifdef _LIBCPP_VERSION
-    // libc++ relies on force_inline attributes, else symbols will be missing.
-    // But its passes (CallGraph and Inliner) - being module passes - have a
-    // quadratically increasing runtime: for each transaction they need to
-    // iterate over all previous transactions' functions.
-    // Until this is solved (for instance by feeding only the new functions
-    // to the CallGraph) we penalize only the use of libc++.
-    if (m_CodeGen) {
-      llvm::Module* TheModule = m_CodeGen->GetModule();
-      // IR passes make sense if we do CodeGen.
-      m_IRTransformers.push_back(new BackendPass(TheSema, TheModule,
-                                                 CI->getDiagnostics(),
-                                                 CI->getTargetOpts(),
-                                                 CI->getLangOpts(),
-                                                 CI->getCodeGenOpts()));
-    }
-#endif
   }
 
-  void
-  IncrementalParser::Initialize(llvm::SmallVectorImpl<Transaction*> &result) {
-    m_TransactionPool.reset(new TransactionPool(getCI()->getSema()));
+  bool
+  IncrementalParser::Initialize(llvm::SmallVectorImpl<ParseResultTransaction>&
+                                result, bool isChildInterpreter) {
+    m_TransactionPool.reset(new TransactionPool);
     if (hasCodeGenerator())
       getCodeGenerator()->Initialize(getCI()->getASTContext());
 
@@ -218,47 +211,72 @@ namespace cling {
     CO.ValuePrinting = CompilationOptions::VPDisabled;
     CO.CodeGeneration = hasCodeGenerator();
 
-    // pull in PCHs
+    Transaction* CurT = beginTransaction(CO);
+    Preprocessor& PP = m_CI->getPreprocessor();
+    DiagnosticsEngine& Diags = m_CI->getSema().getDiagnostics();
+
+    // Pull in PCH.
     const std::string& PCHFileName
-      = m_CI->getInvocation ().getPreprocessorOpts().ImplicitPCHInclude;
+      = m_CI->getInvocation().getPreprocessorOpts().ImplicitPCHInclude;
     if (!PCHFileName.empty()) {
-      Transaction* CurT = beginTransaction(CO);
+      Transaction* PchT = beginTransaction(CO);
+      DiagnosticErrorTrap Trap(Diags);
       m_CI->createPCHExternalASTSource(PCHFileName,
                                        true /*DisablePCHValidation*/,
                                        true /*AllowPCHWithCompilerErrors*/,
                                        0 /*DeserializationListener*/,
                                        true /*OwnsDeserializationListener*/);
-      if (Transaction* EndedT = endTransaction(CurT))
-        result.push_back(EndedT);
+      result.push_back(endTransaction(PchT));
+      if (Trap.hasErrorOccurred()) {
+        result.push_back(endTransaction(CurT));
+        return false;
+      }
     }
 
-    Transaction* CurT = beginTransaction(CO);
+    addClingPragmas(*m_Interpreter);
+
+    // Must happen after attaching the PCH, else PCH elements will end up
+    // being lexed.
+    PP.EnterMainSourceFile();
+
     Sema* TheSema = &m_CI->getSema();
-    m_Parser.reset(new Parser(m_CI->getPreprocessor(), *TheSema,
-                              false /*skipFuncBodies*/));
-    m_CI->getPreprocessor().EnterMainSourceFile();
-    // Initialize the parser after we have entered the main source file.
+    m_Parser.reset(new Parser(PP, *TheSema, false /*skipFuncBodies*/));
+
+    // Initialize the parser after PP has entered the main source file.
     m_Parser->Initialize();
-    // Perform initialization that occurs after the parser has been initialized
-    // but before it parses anything. Initializes the consumers too.
-    // No - already done by m_Parser->Initialize().
-    // TheSema->Initialize();
 
     ExternalASTSource *External = TheSema->getASTContext().getExternalSource();
     if (External)
       External->StartTranslationUnit(m_Consumer);
 
-    // <new> is needed by the ValuePrinter so it's a good thing to include it.
-    // We need to include it to determine the version number of the standard
-    // library implementation.
-    ParseInternal("#include <new>");
-    CheckABICompatibility(m_CI.get());
+    // Start parsing the "main file" to warm up lexing (enter caching lex mode
+    // for ParseInternal()'s call EnterSourceFile() to make sense.
+    while (!m_Parser->ParseTopLevelDecl()) {}
+
+    // If I belong to the parent Interpreter, am using C++, and -noruntime
+    // wasn't given on command line, then #include <new> and check ABI
+    if (!isChildInterpreter && m_CI->getLangOpts().CPlusPlus &&
+        !m_Interpreter->getOptions().NoRuntime) {
+      // <new> is needed by the ValuePrinter so it's a good thing to include it.
+      // We need to include it to determine the version number of the standard
+      // library implementation.
+      ParseInternal("#include <new>");
+      // That's really C++ ABI compatibility. C has other problems ;-)
+      CheckABICompatibility(*m_Interpreter);
+    }
 
     // DO NOT commit the transactions here: static initialization in these
     // transactions requires gCling through local_cxa_atexit(), but that has not
     // been defined yet!
-    if (Transaction* EndedT = endTransaction(CurT))
-      result.push_back(EndedT);
+    ParseResultTransaction PRT = endTransaction(CurT);
+    result.push_back(PRT);
+    return true;
+  }
+
+  bool IncrementalParser::isValid(bool initialized) const {
+    return m_CI && m_CI->hasFileManager() && m_Consumer
+           && !m_VirtualFileID.isInvalid()
+           && (!initialized || (m_TransactionPool && m_Parser));
   }
 
   const Transaction* IncrementalParser::getCurrentTransaction() const {
@@ -272,33 +290,32 @@ namespace cling {
   }
 
   IncrementalParser::~IncrementalParser() {
-    if (hasCodeGenerator()) {
-      getCodeGenerator()->ReleaseModule();
-    }
-    const Transaction* T = getFirstTransaction();
-    const Transaction* nextT = 0;
+    Transaction* T = const_cast<Transaction*>(getFirstTransaction());
     while (T) {
       assert((T->getState() == Transaction::kCommitted
               || T->getState() == Transaction::kRolledBackWithErrors
               || T->getState() == Transaction::kNumStates // reset from the pool
               || T->getState() == Transaction::kRolledBack)
              && "Not committed?");
-      nextT = T->getNext();
-      delete T;
-      T = nextT;
+      const Transaction* nextT = T->getNext();
+      m_TransactionPool->releaseTransaction(T, false);
+      T = const_cast<Transaction*>(nextT);
     }
-
-    for (size_t i = 0; i < m_ASTTransformers.size(); ++i)
-      delete m_ASTTransformers[i];
-
-    for (size_t i = 0; i < m_IRTransformers.size(); ++i)
-      delete m_IRTransformers[i];
   }
+
+  void IncrementalParser::addTransaction(Transaction* T) {
+    if (!T->isNestedTransaction() && T != getLastTransaction()) {
+      if (getLastTransaction())
+        m_Transactions.back()->setNext(T);
+      m_Transactions.push_back(T);
+    }
+  }
+
 
   Transaction* IncrementalParser::beginTransaction(const CompilationOptions&
                                                    Opts) {
     Transaction* OldCurT = m_Consumer->getTransaction();
-    Transaction* NewCurT = m_TransactionPool->takeTransaction();
+    Transaction* NewCurT = m_TransactionPool->takeTransaction(m_CI->getSema());
     NewCurT->setCompilationOpts(Opts);
     // If we are in the middle of transaction and we see another begin
     // transaction - it must be nested transaction.
@@ -312,7 +329,8 @@ namespace cling {
     return NewCurT;
   }
 
-  Transaction* IncrementalParser::endTransaction(Transaction* T) {
+  IncrementalParser::ParseResultTransaction
+  IncrementalParser::endTransaction(Transaction* T) {
     assert(T && "Null transaction!?");
     assert(T->getState() == Transaction::kCollecting);
 
@@ -325,7 +343,24 @@ namespace cling {
 #endif
 
     T->setState(Transaction::kCompleted);
-    // Empty transaction send it back to the pool.
+
+    DiagnosticsEngine& Diag = getCI()->getSema().getDiagnostics();
+
+    //TODO: Make the enum orable.
+    EParseResult ParseResult = kSuccess;
+
+    assert((Diag.hasFatalErrorOccurred() ? Diag.hasErrorOccurred() : true)
+            && "Diag.hasFatalErrorOccurred without Diag.hasErrorOccurred !");
+
+    if (Diag.hasErrorOccurred() || T->getIssuedDiags() == Transaction::kErrors) {
+      T->setIssuedDiags(Transaction::kErrors);
+      ParseResult = kFailed;
+    } else if (Diag.getNumWarnings() > 0) {
+      T->setIssuedDiags(Transaction::kWarnings);
+      ParseResult = kSuccessWithWarnings;
+    }
+
+    // Empty transaction, send it back to the pool.
     if (T->empty()) {
       assert((!m_Consumer->getTransaction()
               || (m_Consumer->getTransaction() == T))
@@ -338,38 +373,32 @@ namespace cling {
         m_Consumer->setTransaction((Transaction*)0);
 
       m_TransactionPool->releaseTransaction(T);
-      return 0;
+      return ParseResultTransaction(nullptr, ParseResult);
     }
 
-    transformTransactionAST(T);
-    if (T->empty()) {
-      m_TransactionPool->releaseTransaction(T);
-      return 0;
-    }
-
-    const DiagnosticsEngine& Diags = getCI()->getSema().getDiagnostics();
-
-    //TODO: Make the enum orable.
-    if (Diags.getNumWarnings() > 0)
-      T->setIssuedDiags(Transaction::kWarnings);
-
-    if (Diags.hasErrorOccurred() || Diags.hasFatalErrorOccurred())
-      T->setIssuedDiags(Transaction::kErrors);
-
-    if (!T->isNestedTransaction() && T != getLastTransaction()) {
-      if (getLastTransaction())
-        m_Transactions.back()->setNext(T);
-      m_Transactions.push_back(T);
-    }
-    return T;
+    addTransaction(T);
+    return ParseResultTransaction(T, ParseResult);
   }
 
-  void IncrementalParser::commitTransaction(Transaction* T) {
-    //Transaction* CurT = m_Consumer->getTransaction();
+  void IncrementalParser::commitTransaction(ParseResultTransaction& PRT,
+                                            bool ClearDiagClient) {
+    Transaction* T = PRT.getPointer();
+    if (!T) {
+      if (PRT.getInt() != kSuccess) {
+        // Nothing has been emitted to Codegen, reset the Diags.
+        DiagnosticsEngine& Diags = getCI()->getSema().getDiagnostics();
+        Diags.Reset(/*soft=*/true);
+        if (ClearDiagClient)
+          Diags.getClient()->clear();
+      }
+      return;
+    }
+
     assert(T->isCompleted() && "Transaction not ended!?");
     assert(T->getState() != Transaction::kCommitted
            && "Committing an already committed transaction.");
-    assert(!T->empty() && "Transactions must not be empty;");
+    assert((T->getIssuedDiags() == Transaction::kErrors || !T->empty())
+           && "Valid Transactions must not be empty;");
 
     // If committing a nested transaction the active one should be its parent
     // from now on.
@@ -378,20 +407,56 @@ namespace cling {
 
     // Check for errors...
     if (T->getIssuedDiags() == Transaction::kErrors) {
-      rollbackTransaction(T);
+      // Make module visible to TransactionUnloader.
+      bool MustStartNewModule = false;
+      if (!T->isNestedTransaction() && hasCodeGenerator()) {
+        MustStartNewModule = true;
+        std::unique_ptr<llvm::Module> M(getCodeGenerator()->ReleaseModule());
+
+        if (M) {
+          T->setModule(std::move(M));
+        }
+      }
+      // Module has been released from Codegen, reset the Diags now.
+      DiagnosticsEngine& Diags = getCI()->getSema().getDiagnostics();
+      Diags.Reset(/*soft=*/true);
+      if (ClearDiagClient)
+        Diags.getClient()->clear();
+
+      PRT.setPointer(nullptr);
+      PRT.setInt(kFailed);
+      m_Interpreter->unload(*T);
+
+      if (MustStartNewModule) {
+        // Create a new module.
+        stdstrstream ModuleName;
+        ModuleName << "cling-module-" << ++m_ModuleNo;
+        getCodeGenerator()->StartModule(ModuleName.str(),
+                                        *m_Interpreter->getLLVMContext(),
+                                        getCI()->getCodeGenOpts());
+      }
       return;
     }
 
     if (T->hasNestedTransactions()) {
+      Transaction* TopmostParent = T->getTopmostParent();
+      EParseResult PR = kSuccess;
+      if (TopmostParent->getIssuedDiags() == Transaction::kErrors)
+        PR = kFailed;
+      else if (TopmostParent->getIssuedDiags() == Transaction::kWarnings)
+        PR = kSuccessWithWarnings;
+
       for (Transaction::const_nested_iterator I = T->nested_begin(),
             E = T->nested_end(); I != E; ++I)
-        if ((*I)->getState() != Transaction::kCommitted)
-          commitTransaction(*I);
+        if ((*I)->getState() != Transaction::kCommitted) {
+          ParseResultTransaction PRT(*I, PR);
+          commitTransaction(PRT);
+        }
     }
 
     // If there was an error coming from the transformers.
     if (T->getIssuedDiags() == Transaction::kErrors) {
-      rollbackTransaction(T);
+      m_Interpreter->unload(*T);
       return;
     }
 
@@ -403,8 +468,8 @@ namespace cling {
       Transaction* nestedT = beginTransaction(CompilationOptions());
       // Pull all template instantiations in that came from the consumers.
       getCI()->getSema().PerformPendingInstantiations();
-      if (Transaction* T = endTransaction(nestedT))
-        commitTransaction(T);
+      ParseResultTransaction nestedPRT = endTransaction(nestedT);
+      commitTransaction(nestedPRT);
       m_Consumer->setTransaction(prevConsumerT);
     }
     m_Consumer->HandleTranslationUnit(getCI()->getASTContext());
@@ -417,14 +482,16 @@ namespace cling {
       Transaction* prevConsumerT = m_Consumer->getTransaction();
       m_Consumer->setTransaction(T);
       codeGenTransaction(T);
-      transformTransactionIR(T);
       T->setState(Transaction::kCommitted);
       if (!T->getParent()) {
-        if (m_Interpreter->runStaticInitializersOnce(*T)
+        if (m_Interpreter->executeTransaction(*T)
             >= Interpreter::kExeFirstError) {
-          // Roll back on error in a transformer
-          assert(0 && "Error on inits.");
-          //rollbackTransaction(nestedT);
+          // Roll back on error in initializers.
+          // T maybe pointing to freed memory after this call:
+          // Interpreter::unload
+          //   IncrementalParser::deregisterTransaction
+          //     TransactionPool::releaseTransaction
+          m_Interpreter->unload(*T);
           return;
         }
       }
@@ -437,29 +504,9 @@ namespace cling {
 
   }
 
-  void IncrementalParser::markWholeTransactionAsUsed(Transaction* T) const {
-    ASTContext& C = m_CI->getASTContext();
-    for (Transaction::const_iterator I = T->decls_begin(), E = T->decls_end();
-         I != E; ++I) {
-      // Copy DCI; it might get relocated below.
-      Transaction::DelayCallInfo DCI = *I;
-      // FIXME: implement for multiple decls in a DGR.
-      assert(DCI.m_DGR.isSingleDecl());
-      Decl* D = DCI.m_DGR.getSingleDecl();
-      if (!D->hasAttr<clang::UsedAttr>())
-        D->addAttr(::new (D->getASTContext())
-                   clang::UsedAttr(D->getSourceRange(), D->getASTContext(),
-                                   0/*AttributeSpellingListIndex*/));
-    }
-    for (Transaction::iterator I = T->deserialized_decls_begin(),
-           E = T->deserialized_decls_end(); I != E; ++I) {
-      // FIXME: implement for multiple decls in a DGR.
-      assert(I->m_DGR.isSingleDecl());
-      Decl* D = I->m_DGR.getSingleDecl();
-      if (!D->hasAttr<clang::UsedAttr>())
-        D->addAttr(::new (C) clang::UsedAttr(D->getSourceRange(), C,
-                                   0/*AttributeSpellingListIndex*/));
-    }
+  void IncrementalParser::emitTransaction(Transaction* T) {
+    for (auto DI = T->decls_begin(), DE = T->decls_end(); DI != DE; ++DI)
+      m_Consumer->HandleTopLevelDecl(DI->m_DGR);
   }
 
   void IncrementalParser::codeGenTransaction(Transaction* T) {
@@ -468,168 +515,80 @@ namespace cling {
     assert(T->getState() == Transaction::kCompleted && "Must be completed");
     assert(hasCodeGenerator() && "No CodeGen");
 
-    T->setModule(getCodeGenerator()->GetModule());
-
     // Could trigger derserialization of decls.
     Transaction* deserT = beginTransaction(CompilationOptions());
-    for (Transaction::const_iterator TI = T->decls_begin(), TE = T->decls_end();
-         TI != TE; ++TI) {
-      // Copy DCI; it might get relocated below.
-      Transaction::DelayCallInfo I = *TI;
 
-      if (I.m_Call == Transaction::kCCIHandleTopLevelDecl)
-        getCodeGenerator()->HandleTopLevelDecl(I.m_DGR);
-      else if (I.m_Call == Transaction::kCCIHandleInterestingDecl) {
-        // Usually through BackendConsumer which doesn't implement
-        // HandleInterestingDecl() and thus calls
-        // ASTConsumer::HandleInterestingDecl()
-        getCodeGenerator()->HandleTopLevelDecl(I.m_DGR);
-      } else if(I.m_Call == Transaction::kCCIHandleTagDeclDefinition) {
-        TagDecl* TD = cast<TagDecl>(I.m_DGR.getSingleDecl());
-        getCodeGenerator()->HandleTagDeclDefinition(TD);
+
+    // Commit this transaction first - T might need symbols from it, so
+    // trigger emission of weak symbols by providing use.
+    ParseResultTransaction PRT = endTransaction(deserT);
+    commitTransaction(PRT);
+    deserT = PRT.getPointer();
+
+    // This llvm::Module is done; finalize it and pass it to the execution
+    // engine.
+    if (!T->isNestedTransaction() && hasCodeGenerator()) {
+      // The initializers are emitted to the symbol "_GLOBAL__sub_I_" + filename.
+      // Make that unique!
+      ASTContext& Context = getCI()->getASTContext();
+      SourceManager &SM = Context.getSourceManager();
+      const FileEntry *MainFile = SM.getFileEntryForID(SM.getMainFileID());
+      FileEntry* NcMainFile = const_cast<FileEntry*>(MainFile);
+      // Hack to temporarily set the file entry's name to a unique name.
+      assert(MainFile->getName() == *(const char**)NcMainFile
+         && "FileEntry does not start with the name");
+      const char* &FileName = *(const char**)NcMainFile;
+      const char* OldName = FileName;
+      std::string ModName = getCodeGenerator()->GetModule()->getName().str();
+      FileName = ModName.c_str();
+
+      deserT = beginTransaction(CompilationOptions());
+      // Reset the module builder to clean up global initializers, c'tors, d'tors
+      getCodeGenerator()->HandleTranslationUnit(Context);
+      FileName = OldName;
+      auto PRT = endTransaction(deserT);
+      commitTransaction(PRT);
+      deserT = PRT.getPointer();
+
+      std::unique_ptr<llvm::Module> M(getCodeGenerator()->ReleaseModule());
+
+      if (M) {
+        m_Interpreter->addModule(M.get());
+        T->setModule(std::move(M));
       }
-      else if (I.m_Call == Transaction::kCCIHandleVTable) {
-        CXXRecordDecl* CXXRD = cast<CXXRecordDecl>(I.m_DGR.getSingleDecl());
-        getCodeGenerator()->HandleVTable(CXXRD, /*isRequired*/true);
+
+      if (T->getIssuedDiags() != Transaction::kNone) {
+        // Module has been released from Codegen, reset the Diags now.
+        DiagnosticsEngine& Diags = getCI()->getSema().getDiagnostics();
+        Diags.Reset(/*soft=*/true);
+        Diags.getClient()->clear();
       }
-      else if (I.m_Call
-               == Transaction::kCCIHandleCXXImplicitFunctionInstantiation) {
-        FunctionDecl* FD = cast<FunctionDecl>(I.m_DGR.getSingleDecl());
-        getCodeGenerator()->HandleCXXImplicitFunctionInstantiation(FD);
-      }
-      else if (I.m_Call
-               == Transaction::kCCIHandleCXXStaticMemberVarInstantiation) {
-        VarDecl* VD = cast<VarDecl>(I.m_DGR.getSingleDecl());
-        getCodeGenerator()->HandleCXXStaticMemberVarInstantiation(VD);
-      }
-      else if (I.m_Call == Transaction::kCCICompleteTentativeDefinition) {
-        VarDecl* VD = cast<VarDecl>(I.m_DGR.getSingleDecl());
-        getCodeGenerator()->CompleteTentativeDefinition(VD);
-      }
-      else if (I.m_Call == Transaction::kCCINone)
-        ; // We use that internally as delimiter in the Transaction.
-      else
-        llvm_unreachable("We shouldn't have decl without call info.");
+
+      // Create a new module.
+      smallstream ModuleName;
+      ModuleName << "cling-module-" << ++m_ModuleNo;
+      getCodeGenerator()->StartModule(ModuleName.str(),
+                                      *m_Interpreter->getLLVMContext(),
+                                      getCI()->getCodeGenOpts());
+    }
+  }
+
+  void IncrementalParser::deregisterTransaction(Transaction& T) {
+    if (&T == m_Consumer->getTransaction())
+      m_Consumer->setTransaction(T.getParent());
+
+    if (Transaction* Parent = T.getParent()) {
+      Parent->removeNestedTransaction(&T);
+      T.setParent(0);
+    } else {
+      // Remove from the queue
+      assert(&T == m_Transactions.back() && "Out of order transaction removal");
+      m_Transactions.pop_back();
+      if (!m_Transactions.empty())
+        m_Transactions.back()->setNext(0);
     }
 
-    // Treat the deserialized decls differently.
-    for (Transaction::iterator I = T->deserialized_decls_begin(),
-           E = T->deserialized_decls_end(); I != E; ++I) {
-
-      for (DeclGroupRef::iterator DI = I->m_DGR.begin(), DE = I->m_DGR.end();
-           DI != DE; ++DI) {
-        DeclGroupRef SplitDGR(*DI);
-        if (I->m_Call == Transaction::kCCIHandleTopLevelDecl) {
-          // FIXME: The special namespace treatment (not sending itself to
-          // CodeGen, but only its content - if the contained decl should be
-          // emitted) works around issue with the static initialization when
-          // having a PCH and loading a library. We don't want to generate
-          // code for the static that will come through the library.
-          //
-          // This will be fixed with the clang::Modules. Make sure we remember.
-          assert(!getCI()->getLangOpts().Modules && "Please revisit!");
-          if (NamespaceDecl* ND = dyn_cast<NamespaceDecl>(*DI)) {
-            for (NamespaceDecl::decl_iterator IN = ND->decls_begin(),
-                   EN = ND->decls_end(); IN != EN; ++IN) {
-              // Recurse over decls inside the namespace, like
-              // CodeGenModule::EmitNamespace() does.
-              if (!shouldIgnore(*IN))
-                getCodeGenerator()->HandleTopLevelDecl(DeclGroupRef(*IN));
-            }
-          } else if (!shouldIgnore(*DI)) {
-            getCodeGenerator()->HandleTopLevelDecl(SplitDGR);
-          }
-          continue;
-        } // HandleTopLevel
-
-        if (shouldIgnore(*DI))
-          continue;
-
-        if (I->m_Call == Transaction::kCCIHandleInterestingDecl) {
-          // Usually through BackendConsumer which doesn't implement
-          // HandleInterestingDecl() and thus calls
-          // ASTConsumer::HandleInterestingDecl()
-          getCodeGenerator()->HandleTopLevelDecl(SplitDGR);
-        } else if(I->m_Call == Transaction::kCCIHandleTagDeclDefinition) {
-          TagDecl* TD = cast<TagDecl>(*DI);
-          getCodeGenerator()->HandleTagDeclDefinition(TD);
-        }
-        else if (I->m_Call == Transaction::kCCIHandleVTable) {
-          CXXRecordDecl* CXXRD = cast<CXXRecordDecl>(*DI);
-          getCodeGenerator()->HandleVTable(CXXRD, /*isRequired*/true);
-        }
-        else if (I->m_Call
-                 == Transaction::kCCIHandleCXXImplicitFunctionInstantiation) {
-          FunctionDecl* FD = cast<FunctionDecl>(*DI);
-          getCodeGenerator()->HandleCXXImplicitFunctionInstantiation(FD);
-        }
-        else if (I->m_Call
-                 == Transaction::kCCIHandleCXXStaticMemberVarInstantiation) {
-          VarDecl* VD = cast<VarDecl>(*DI);
-          getCodeGenerator()->HandleCXXStaticMemberVarInstantiation(VD);
-        }
-        else if (I->m_Call == Transaction::kCCICompleteTentativeDefinition) {
-          VarDecl* VD = cast<VarDecl>(I->m_DGR.getSingleDecl());
-          getCodeGenerator()->CompleteTentativeDefinition(VD);
-        }
-        else if (I->m_Call == Transaction::kCCINone)
-          ; // We use that internally as delimiter in the Transaction.
-        else
-          llvm_unreachable("We shouldn't have decl without call info.");
-      } // for decls in DGR
-    } // for deserialized DGRs
-
-    getCodeGenerator()->HandleTranslationUnit(getCI()->getASTContext());
-    if ((deserT = endTransaction(deserT)))
-      commitTransaction(deserT);
-  }
-
-  void IncrementalParser::transformTransactionAST(Transaction* T) {
-    bool success = true;
-    // We are sure it's safe to pipe it through the transformers
-    // Consume late transformers init
-    Transaction* initT = beginTransaction(CompilationOptions());
-
-    for (size_t i = 0; success && i < m_ASTTransformers.size(); ++i)
-      success = m_ASTTransformers[i]->TransformTransaction(*T);
-
-    if (endTransaction(initT))
-      commitTransaction(initT);
-
-    if (!success)
-      T->setIssuedDiags(Transaction::kErrors);
-  }
-
-  bool IncrementalParser::transformTransactionIR(Transaction* T) {
-    // Transform IR
-    bool success = true;
-    for (size_t i = 0; success && i < m_IRTransformers.size(); ++i)
-      success = m_IRTransformers[i]->TransformTransaction(*T);
-    if (!success)
-      rollbackTransaction(T);
-    return success;
-  }
-
-  void IncrementalParser::rollbackTransaction(Transaction* T) {
-    assert(T && "Must have value");
-    assert(T == getLastTransaction() && "We always must revert the last T");
-    assert((T->getState() != Transaction::kRolledBack ||
-            T->getState() != Transaction::kRolledBackWithErrors) &&
-           "Transaction already rolled back.");
-    if (m_Interpreter->getOptions().ErrorOut)
-      return;
-
-    TransactionUnloader U(&getCI()->getSema(), m_CodeGen.get(),
-                          m_Interpreter->getExecutionEngine());
-
-    if (U.RevertTransaction(T))
-      T->setState(Transaction::kRolledBack);
-    else
-      T->setState(Transaction::kRolledBackWithErrors);
-
-    // Remove from the queue
-    m_Transactions.pop_back();
-    //m_TransactionPool->releaseTransaction(T);
+    m_TransactionPool->releaseTransaction(&T);
   }
 
   std::vector<const Transaction*> IncrementalParser::getAllTransactions() {
@@ -675,11 +634,13 @@ namespace cling {
   void IncrementalParser::initializeVirtualFile() {
     SourceManager& SM = getCI()->getSourceManager();
     m_VirtualFileID = SM.getMainFileID();
-    assert(!m_VirtualFileID.isInvalid() && "No VirtualFileID created?");
+    if (m_VirtualFileID.isInvalid())
+      cling::errs() << "VirtualFileID could not be created.\n";
   }
 
-  Transaction* IncrementalParser::Compile(llvm::StringRef input,
-                                          const CompilationOptions& Opts) {
+  IncrementalParser::ParseResultTransaction
+  IncrementalParser::Compile(llvm::StringRef input,
+                             const CompilationOptions& Opts) {
     Transaction* CurT = beginTransaction(Opts);
     EParseResult ParseRes = ParseInternal(input);
 
@@ -688,19 +649,10 @@ namespace cling {
     else if (ParseRes == kFailed)
       CurT->setIssuedDiags(Transaction::kErrors);
 
-    if ((CurT = endTransaction(CurT))) {
-      commitTransaction(CurT);
-    }
+    ParseResultTransaction PRT = endTransaction(CurT);
+    commitTransaction(PRT);
 
-    return CurT;
-  }
-
-  Transaction* IncrementalParser::Parse(llvm::StringRef input,
-                                        const CompilationOptions& Opts) {
-    Transaction* CurT = beginTransaction(Opts);
-    ParseInternal(input);
-    Transaction* EndedT = endTransaction(CurT);
-    return EndedT;
+    return PRT;
   }
 
   // Add the input to the memory buffer, parse it, and add it to the AST.
@@ -710,9 +662,11 @@ namespace cling {
 
     Sema& S = getCI()->getSema();
 
+    const CompilationOptions& CO
+       = m_Consumer->getTransaction()->getCompilationOpts();
+
     assert(!(S.getLangOpts().Modules
-             && m_Consumer->getTransaction()->getCompilationOpts()
-              .CodeGenerationForModule)
+             && CO.CodeGenerationForModule)
            && "CodeGenerationForModule to be removed once PCMs are available!");
 
     // Recover resources if we crash before exiting this method.
@@ -732,52 +686,112 @@ namespace cling {
     // Create an uninitialized memory buffer, copy code in and append "\n"
     size_t InputSize = input.size(); // don't include trailing 0
     // MemBuffer size should *not* include terminating zero
-    llvm::MemoryBuffer* MB
-      = llvm::MemoryBuffer::getNewUninitMemBuffer(InputSize + 1,
-                                                  source_name.str());
+    std::unique_ptr<llvm::MemoryBuffer>
+      MB(llvm::MemoryBuffer::getNewUninitMemBuffer(InputSize + 1,
+                                                   source_name.str()));
     char* MBStart = const_cast<char*>(MB->getBufferStart());
     memcpy(MBStart, input.data(), InputSize);
     memcpy(MBStart + InputSize, "\n", 2);
 
-    m_MemoryBuffers.push_back(MB);
     SourceManager& SM = getCI()->getSourceManager();
 
     // Create SourceLocation, which will allow clang to order the overload
     // candidates for example
     SourceLocation NewLoc = getLastMemoryBufferEndLoc().getLocWithOffset(1);
 
-    // Create FileID for the current buffer
-    FileID FID = SM.createFileID(m_MemoryBuffers.back(),
-                                 SrcMgr::C_User,
+    llvm::MemoryBuffer* MBNonOwn = MB.get();
+
+    // Create FileID for the current buffer.
+    FileID FID;
+    if (CO.CodeCompletionOffset == -1)
+    {
+      FID = SM.createFileID(std::move(MB), SrcMgr::C_User,
                                  /*LoadedID*/0,
                                  /*LoadedOffset*/0, NewLoc);
+    } else {
+      // Create FileEntry and FileID for the current buffer.
+      // Enabling the completion point only works on FileEntries.
+      const clang::FileEntry* FE
+        = SM.getFileManager().getVirtualFile("vfile for " + source_name.str(),
+                                             InputSize, 0 /* mod time*/);
+      SM.overrideFileContents(FE, std::move(MB));
+      FID = SM.createFileID(FE, NewLoc, SrcMgr::C_User);
 
+      // The completion point is set one a 1-based line/column numbering.
+      // It relies on the implementation to account for the wrapper extra line.
+      PP.SetCodeCompletionPoint(FE, 1/* start point 1-based line*/,
+                                CO.CodeCompletionOffset+1/* 1-based column*/);
+    }
+
+    m_MemoryBuffers.push_back(std::make_pair(MBNonOwn, FID));
+
+    // NewLoc only used for diags.
     PP.EnterSourceFile(FID, /*DirLookup*/0, NewLoc);
     m_Consumer->getTransaction()->setBufferFID(FID);
 
-    Parser::DeclGroupPtrTy ADecl;
+    DiagnosticsEngine& Diags = getCI()->getDiagnostics();
 
+    FilteringDiagConsumer::RAAI RAAITmp(*m_DiagConsumer, CO.IgnorePromptDiags);
+
+    DiagnosticErrorTrap Trap(Diags);
+    Sema::SavePendingInstantiationsRAII SavedPendingInstantiations(S);
+
+    Parser::DeclGroupPtrTy ADecl;
     while (!m_Parser->ParseTopLevelDecl(ADecl)) {
       // If we got a null return and something *was* parsed, ignore it.  This
       // is due to a top-level semicolon, an action override, or a parse error
       // skipping something.
+      if (Trap.hasErrorOccurred())
+        m_Consumer->getTransaction()->setIssuedDiags(Transaction::kErrors);
       if (ADecl)
         m_Consumer->HandleTopLevelDecl(ADecl.get());
     };
+    // If never entered the while block, there's a chance an error occured
+    if (Trap.hasErrorOccurred())
+      m_Consumer->getTransaction()->setIssuedDiags(Transaction::kErrors);
+
+    if (CO.CodeCompletionOffset != -1) {
+      assert((int)SM.getFileOffset(PP.getCodeCompletionLoc())
+             == CO.CodeCompletionOffset
+             && "Completion point wrongly set!");
+      assert(PP.isCodeCompletionReached()
+             && "Code completion set but not reached!");
+
+      // Let's ignore this transaction:
+      m_Consumer->getTransaction()->setIssuedDiags(Transaction::kErrors);
+
+      return kSuccess;
+    }
+
+#ifdef LLVM_ON_WIN32
+    // Microsoft-specific:
+    // Late parsed templates can leave unswallowed "macro"-like tokens.
+    // They will seriously confuse the Parser when entering the next
+    // source file. So lex until we are EOF.
+    Token Tok;
+    do {
+      PP.Lex(Tok);
+    } while (Tok.isNot(tok::eof));
+#endif
+
+#ifndef NDEBUG
+    Token AssertTok;
+    PP.Lex(AssertTok);
+    assert(AssertTok.is(tok::eof) && "Lexer must be EOF when starting incremental parse!");
+#endif
 
     // Process any TopLevelDecls generated by #pragma weak.
     for (llvm::SmallVector<Decl*,2>::iterator I = S.WeakTopLevelDecls().begin(),
-           E = S.WeakTopLevelDecls().end(); I != E; ++I) {
+         E = S.WeakTopLevelDecls().end(); I != E; ++I) {
       m_Consumer->HandleTopLevelDecl(DeclGroupRef(*I));
     }
 
-    DiagnosticsEngine& Diag = S.getDiagnostics();
-    if (Diag.hasErrorOccurred())
-      return IncrementalParser::kFailed;
-    else if (Diag.getNumWarnings())
-      return IncrementalParser::kSuccessWithWarnings;
+    if (m_Consumer->getTransaction()->getIssuedDiags() == Transaction::kErrors)
+      return kFailed;
+    else if (Diags.getNumWarnings())
+      return kSuccessWithWarnings;
 
-    return IncrementalParser::kSuccess;
+    return kSuccess;
   }
 
   void IncrementalParser::printTransactionStructure() const {
@@ -786,34 +800,34 @@ namespace cling {
     }
   }
 
-  bool IncrementalParser::shouldIgnore(const Decl* D) const {
-    // This function is called for all "deserialized" decls, where the
-    // "deserialized" decl either really comes from an AST file or from
-    // a header that's loaded to import the AST for a library with a dictionary
-    // (the non-PCM case).
-    //
-    // Functions that are inlined must be sent to CodeGen - they will not have a
-    // symbol in the library.
-    if (const FunctionDecl* FD = dyn_cast<FunctionDecl>(D)) {
-      if (D->isFromASTFile()) {
-        return !FD->hasBody();
-      } else {
-        // If the decl must be emitted then it will be in the library.
-        // If not, we must expose it to CodeGen now because it might
-        // not be in the library. Does this correspond to a weak symbol
-        // by definition?
-        return !(FD->isInlined() || FD->isTemplateInstantiation());
-      }
+  void IncrementalParser::SetTransformers(bool isChildInterpreter) {
+    // Add transformers to the IncrementalParser, which owns them
+    Sema* TheSema = &m_CI->getSema();
+    // Register the AST Transformers
+    typedef std::unique_ptr<ASTTransformer> ASTTPtr_t;
+    std::vector<ASTTPtr_t> ASTTransformers;
+    ASTTransformers.emplace_back(new AutoSynthesizer(TheSema));
+    ASTTransformers.emplace_back(new EvaluateTSynthesizer(TheSema));
+    if (hasCodeGenerator() && !m_Interpreter->getOptions().NoRuntime) {
+       // Don't protect against crashes if we cannot run anything.
+       // cling might also be in a PCH-generation mode; don't inject our Sema pointer
+       // into the PCH.
+       ASTTransformers.emplace_back(new NullDerefProtectionTransformer(m_Interpreter));
     }
 
-    // Don't codegen statics coming in from a module; they are already part of
-    // the library.
-    // We do need to expose static variables from template instantiations.
-    if (const VarDecl* VD = dyn_cast<VarDecl>(D))
-      if (VD->hasGlobalStorage() && !VD->getType().isConstQualified()
-          && VD->getTemplateSpecializationKind() == TSK_Undeclared)
-        return true;
-    return false;
+    typedef std::unique_ptr<WrapperTransformer> WTPtr_t;
+    std::vector<WTPtr_t> WrapperTransformers;
+    if (!m_Interpreter->getOptions().NoRuntime)
+      WrapperTransformers.emplace_back(new ValuePrinterSynthesizer(TheSema));
+    WrapperTransformers.emplace_back(new DeclExtractor(TheSema));
+    if (!m_Interpreter->getOptions().NoRuntime)
+      WrapperTransformers.emplace_back(new ValueExtractionSynthesizer(TheSema,
+                                                           isChildInterpreter));
+    WrapperTransformers.emplace_back(new CheckEmptyTransactionTransformer(TheSema));
+
+    m_Consumer->SetTransformers(std::move(ASTTransformers),
+                                std::move(WrapperTransformers));
   }
+
 
 } // namespace cling

@@ -3,6 +3,7 @@
 # @author Pere Mato, CERN
 ############################################################################
 
+ROOT_ADD_CXX_FLAG(CMAKE_CXX_FLAGS -Wno-deprecated-declarations) # auto_ptr
 
 set(headers1 Roo1DTable.h RooAbsArg.h RooAbsBinning.h RooAbsCategory.h RooAbsCategoryLValue.h RooAbsCollection.h
              RooAbsData.h RooAbsFunc.h RooAbsGenContext.h RooAbsTestStatistic.h RooAbsHiddenReal.h RooAbsIntegrator.h 
@@ -41,7 +42,7 @@ set(headers4 RooConstraintSum.h RooRecursiveFraction.h RooDataWeightedAverage.h
              RooMultiVarGaussian.h RooXYChi2Var.h RooAbsDataStore.h RooTreeDataStore.h RooTreeData.h
              RooMinimizer.h RooMinimizerFcn.h RooMoment.h RooStudyManager.h RooAbsStudy.h
              RooGenFitStudy.h RooProofDriverSelector.h RooStudyPackage.h RooCompositeDataStore.h RooRangeBoolean.h 
-             RooVectorDataStore.h RooUnitTest.h RooExtendedBinding.h)
+             RooVectorDataStore.h RooUnitTest.h RooExtendedBinding.h RooAbsMoment.h RooFirstMoment.h RooSecondMoment.h)
 
 ROOT_GENERATE_DICTIONARY(G__RooFitCore MODULE RooFitCore ${headers1} ${headers2} ${headers3} ${headers4} LINKDEF LinkDef.h OPTIONS "-writeEmptyRootPCM")
 

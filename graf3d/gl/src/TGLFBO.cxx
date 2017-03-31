@@ -10,29 +10,35 @@
  *************************************************************************/
 
 #include "TGLFBO.h"
+#include "TGLIncludes.h"
 #include <TMath.h>
 #include <TString.h>
 #include <TError.h>
 
-#include <GL/glew.h>
-
 #include <stdexcept>
 
-//______________________________________________________________________________
-//
-// Frame-buffer object.
-//
-// Requires GL-1.5.
-//
-// Taken from Gled project, see:
-//   http://www.gled.org/cgi-bin/viewcvs.cgi/trunk/libsets/GledCore/Pupils/
-// See also:
-//   http://www.opengl.org/registry/specs/EXT/framebuffer_object.txt
+/** \class TGLFBO
+\ingroup opengl
+Frame-buffer object.
+
+Requires GL-1.5.
+
+Taken from Gled project, see:
+
+   http://www.gled.org/cgi-bin/viewcvs.cgi/trunk/libsets/GledCore/Pupils/
+
+See also:
+
+   http://www.opengl.org/registry/specs/EXT/framebuffer_object.txt
+*/
 
 ClassImp(TGLFBO);
 
 Bool_t TGLFBO::fgRescaleToPow2       = kTRUE; // For ATI.
 Bool_t TGLFBO::fgMultiSampleNAWarned = kFALSE;
+
+////////////////////////////////////////////////////////////////////////////////
+/// Constructor.
 
 TGLFBO::TGLFBO() :
    fFrameBuffer  (0),
@@ -42,29 +48,30 @@ TGLFBO::TGLFBO() :
    fMSColorBuffer(0),
    fW (-1),
    fH (-1),
+   fReqW (-1),
+   fReqH (-1),
    fMSSamples  (0),
    fMSCoverageSamples (0),
    fWScale     (1),
    fHScale     (1),
    fIsRescaled (kFALSE)
 {
-   // Constructor.
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Destructor.
+
 TGLFBO::~TGLFBO()
 {
-   // Destructor.
-
    Release();
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Acquire GL resources for given width, height and number of
+/// multi-sampling samples.
+
 void TGLFBO::Init(int w, int h, int ms_samples)
 {
-   // Acquire GL resources for given width, height and number of
-   // multi-sampling samples.
-
    static const std::string eh("TGLFBO::Init ");
 
    // Should be replaced with ARB_framebuffer_object (SLC6).
@@ -72,6 +79,8 @@ void TGLFBO::Init(int w, int h, int ms_samples)
    {
       throw std::runtime_error(eh + "GL_EXT_framebuffer_object extension required for FBO.");
    }
+
+   fReqW = w; fReqH = h;
 
    fIsRescaled = kFALSE;
    if (fgRescaleToPow2)
@@ -165,11 +174,11 @@ void TGLFBO::Init(int w, int h, int ms_samples)
    }
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Release the allocated GL resources.
+
 void TGLFBO::Release()
 {
-   // Release the allocated GL resources.
-
    glDeleteFramebuffersEXT (1, &fFrameBuffer);
    glDeleteRenderbuffersEXT(1, &fDepthBuffer);
 
@@ -182,11 +191,11 @@ void TGLFBO::Release()
 
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Bind the frame-buffer object.
+
 void TGLFBO::Bind()
 {
-   // Bind the frame-buffer object.
-
    if (fMSSamples > 0) {
       glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fMSFrameBuffer);
       // On by default
@@ -199,11 +208,11 @@ void TGLFBO::Bind()
    }
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Unbind the frame-buffer object.
+
 void TGLFBO::Unbind()
 {
-   // Unbind the frame-buffer object.
-
    if (fMSSamples > 0)
    {
       glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, fMSFrameBuffer);
@@ -214,11 +223,11 @@ void TGLFBO::Unbind()
    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Bind texture.
+
 void TGLFBO::BindTexture()
 {
-   // Bind texture.
-
    glPushAttrib(GL_TEXTURE_BIT);
    glBindTexture(GL_TEXTURE_2D, fColorTexture);
    glEnable(GL_TEXTURE_2D);
@@ -232,11 +241,11 @@ void TGLFBO::BindTexture()
    }
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Unbind texture.
+
 void TGLFBO::UnbindTexture()
 {
-   // Unbind texture.
-
    if (fIsRescaled)
    {
       glMatrixMode(GL_TEXTURE);
@@ -247,7 +256,8 @@ void TGLFBO::UnbindTexture()
    glPopAttrib();
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+
 void TGLFBO::SetAsReadBuffer()
 {
    glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, fFrameBuffer);
@@ -255,7 +265,8 @@ void TGLFBO::SetAsReadBuffer()
 
 //==============================================================================
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+
 void TGLFBO::InitStandard()
 {
    glGenFramebuffersEXT(1, &fFrameBuffer);
@@ -265,7 +276,8 @@ void TGLFBO::InitStandard()
    fColorTexture = CreateAndAttachColorTexture();
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+
 void TGLFBO::InitMultiSample()
 {
    glGenFramebuffersEXT(1, &fMSFrameBuffer);
@@ -281,7 +293,8 @@ void TGLFBO::InitMultiSample()
    fColorTexture = CreateAndAttachColorTexture();
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+
 UInt_t TGLFBO::CreateAndAttachRenderBuffer(Int_t format, Int_t type)
 {
    UInt_t id = 0;
@@ -306,11 +319,11 @@ UInt_t TGLFBO::CreateAndAttachRenderBuffer(Int_t format, Int_t type)
    return id;
 }
 
-//______________________________________________________________________________
+////////////////////////////////////////////////////////////////////////////////
+/// Initialize color-texture and attach it to current FB.
+
 UInt_t TGLFBO::CreateAndAttachColorTexture()
 {
-   // Initialize color-texture and attach it to current FB.
-
    UInt_t id = 0;
 
    glGenTextures(1, &id);
@@ -327,4 +340,21 @@ UInt_t TGLFBO::CreateAndAttachColorTexture()
                              GL_TEXTURE_2D, id, 0);
 
    return id;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+/// Return state of fgRescaleToPow2 static member.
+
+Bool_t TGLFBO::GetRescaleToPow2()
+{
+   return fgRescaleToPow2;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+/// Set state of fgRescaleToPow2 static member.
+/// Default is kTRUE as this works better on older hardware, especially ATI.
+
+void TGLFBO::SetRescaleToPow2(Bool_t r)
+{
+   fgRescaleToPow2 = r;
 }

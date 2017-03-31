@@ -22,9 +22,7 @@
 //                                                                      //
 //////////////////////////////////////////////////////////////////////////
 
-#ifndef ROOT_TObject
 #include "TObject.h"
-#endif
 
 class TVirtualMutex;
 
@@ -77,13 +75,20 @@ private:
 public:
    TLockGuard(TVirtualMutex *mutex)
      : fMutex(mutex) { if (fMutex) fMutex->Lock(); }
-   virtual ~TLockGuard() { if (fMutex) fMutex->UnLock(); }
+   Int_t UnLock() {
+      if (!fMutex) return 0;
+      auto tmp = fMutex;
+      fMutex = 0;
+      return tmp->UnLock();
+   }
+   ~TLockGuard() { if (fMutex) fMutex->UnLock(); }
 
-   ClassDef(TLockGuard,0)  // Exception safe locking/unlocking of mutex
+   ClassDefNV(TLockGuard,0)  // Exception safe locking/unlocking of mutex
 };
 
 // Zero overhead macros in case not compiled with thread support
 #if defined (_REENTRANT) || defined (WIN32)
+
 #define R__LOCKGUARD(mutex) TLockGuard _R__UNIQUE_(R__guard)(mutex)
 #define R__LOCKGUARD2(mutex)                             \
    if (gGlobalMutex && !mutex) {                         \
@@ -93,9 +98,33 @@ public:
       gGlobalMutex->UnLock();                            \
    }                                                     \
    R__LOCKGUARD(mutex)
+#define R__LOCKGUARD_NAMED(name,mutex) TLockGuard _NAME2_(R__guard,name)(mutex)
+#define R__LOCKGUARD_UNLOCK(name) _NAME2_(R__guard,name).UnLock()
 #else
 #define R__LOCKGUARD(mutex)  if (mutex) { }
+#define R__LOCKGUARD_NAMED(name,mutex) if (mutex) { }
 #define R__LOCKGUARD2(mutex) if (mutex) { }
+#define R__LOCKGUARD_UNLOCK(name) { }
+#endif
+
+#ifdef R__USE_IMT
+#define R__LOCKGUARD_IMT(mutex)  if (ROOT::Internal::IsParBranchProcessingEnabled()) R__LOCKGUARD(mutex)
+#define R__LOCKGUARD_IMT2(mutex) if (ROOT::Internal::IsParBranchProcessingEnabled()) R__LOCKGUARD2(mutex)
+#else
+#define R__LOCKGUARD_IMT(mutex)  { }
+#define R__LOCKGUARD_IMT2(mutex) { }
+#endif
+
+#ifdef R__USE_IMT
+#define R__RWLOCK_ACQUIRE_READ(rwlock)  if (ROOT::Internal::IsParTreeProcessingEnabled()) rwlock.ReadLock();
+#define R__RWLOCK_RELEASE_READ(rwlock)  if (ROOT::Internal::IsParTreeProcessingEnabled()) rwlock.ReadUnLock();
+#define R__RWLOCK_ACQUIRE_WRITE(rwlock) if (ROOT::Internal::IsParTreeProcessingEnabled()) rwlock.WriteLock();
+#define R__RWLOCK_RELEASE_WRITE(rwlock) if (ROOT::Internal::IsParTreeProcessingEnabled()) rwlock.WriteUnLock();
+#else
+#define R__RWLOCK_ACQUIRE_READ(rwlock)  { }
+#define R__RWLOCK_RELEASE_READ(rwlock)  { }
+#define R__RWLOCK_ACQUIRE_WRITE(rwlock) { }
+#define R__RWLOCK_RELEASE_WRITE(rwlock) { }
 #endif
 
 #endif
