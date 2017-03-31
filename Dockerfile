@@ -10,6 +10,8 @@ libcfitsio-dev graphviz-dev libavahi-compat-libdnssd-dev libldap2-dev \
 python-dev libxml2-dev libkrb5-dev libgsl0-dev libqt4-dev
 
 #Build ROOT & delete build files
+RUN mkdir mjsw
+RUN mkdir mjsw/mjdeps
 RUN mkdir mjsw/mjdeps/ROOT
 RUN mkdir mjsw/mjdeps/ROOT/src
 COPY . mjsw/mjdeps/ROOT/src
