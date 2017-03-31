@@ -20,7 +20,7 @@ RUN cmake -DCMAKE_INSTALL_DIR=../install -Dgdml=ON -Dminuit2=ON -Droofit=ON ../s
 RUN cmake --build . --target install
 
 #Set ROOT environment
-ENV ROOTSYS "/mjsw/mjdeps/ROOT/<INSERT_ROOT_VERSION_NUMBER_HERE>/install"
+ENV ROOTSYS "/mjsw/mjdeps/ROOT/install"
 ENV PATH "$ROOTSYS/bin:$PATH"
 ENV LD_LIBRARY_PATH "$ROOTSYS/lib:$LD_LIBRARY_PATH"
 ENV PYTHONPATH "$ROOTSYS/lib:$PYTHONPATH"
